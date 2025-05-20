@@ -2,3 +2,6 @@ name = "MyDiffMLP"
 uuid = "f6602607-f82c-41d6-87eb-03a3e5a9b544"
 authors = ["Nazar Shcherbyna <nazar.force@gmail.com>"]
 version = "0.1.0"
+
+[deps]
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
