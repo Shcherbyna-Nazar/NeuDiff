@@ -2,7 +2,8 @@ module MyNN
 
 using ..MyAD
 
-export Dense, Chain, parameters, update!, Dropout
+export Dense, Chain, parameters, update!, Dropout, zero_gradients!, AdamState,
+       update_adam!
 
 
 
@@ -14,8 +15,9 @@ end
 
 
 function Dense(in::Int, out::Int, act = MyAD.identity_fn)
-    std = act == MyAD.relu ? sqrt(2 / in) : sqrt(6.0 / (in + out))  # He lub Xavier
-    W = MyAD.Variable(randn(out, in) * std, zeros(out, in))         # UWAGA: randn, nie rand
+    std = act == MyAD.relu ? sqrt(2 / in) : sqrt(1.0) 
+
+    W = MyAD.Variable(randn(out, in) * std, zeros(out, in))        
     b = MyAD.Variable(zeros(out, 1), zeros(out, 1))
     return Dense(W, b, act)
 end
@@ -51,11 +53,7 @@ function (chain::Chain)(x)
     return x
 end
 
-"""
-    parameters(model::Chain)
 
-Zwraca wszystkie parametry uczące się (Variable) z modelu.
-"""
 function parameters(model::Chain)
     ps = MyAD.GraphNode[]
     for layer in model.layers
@@ -67,15 +65,48 @@ function parameters(model::Chain)
 end
 
 
-"""
-    update!(params, η)
-
-Aktualizuje wartości parametrów przez odejmowanie gradientu z krokiem η.
-"""
 function update!(params::Vector{MyAD.GraphNode}, η::Real)
     for p in params
         p.output .-= η .* p.gradient
     end
 end
+
+function zero_gradients!(model::Chain)
+    for p in parameters(model)
+        p.gradient .= 0.0
+    end
+end
+
+mutable struct AdamState
+    m::Vector{Matrix{Float64}}  # pierwszy moment (średnia gradientów)
+    v::Vector{Matrix{Float64}}  # drugi moment (średnia kwadratów gradientów)
+    β1::Float64
+    β2::Float64
+    ϵ::Float64
+    t::Int
+end
+
+
+function AdamState(params; β1=0.9, β2=0.999, ϵ=1e-8)
+    m = [zero(p.output) for p in params]
+    v = [zero(p.output) for p in params]
+    return AdamState(m, v, β1, β2, ϵ, 0)
+end
+
+
+function update_adam!(state::AdamState, params::Vector{MyAD.GraphNode}, η::Real)
+    state.t += 1
+    for (i, p) in enumerate(params)
+        g = p.gradient
+        state.m[i] .= state.β1 .* state.m[i] .+ (1 .- state.β1) .* g
+        state.v[i] .= state.β2 .* state.v[i] .+ (1 .- state.β2) .* (g .^ 2)
+
+        m_hat = state.m[i] ./ (1 .- state.β1 ^ state.t)
+        v_hat = state.v[i] ./ (1 .- state.β2 ^ state.t)
+
+        p.output .-= η .* m_hat ./ (sqrt.(v_hat) .+ state.ϵ)
+    end
+end
+
 
 end # module

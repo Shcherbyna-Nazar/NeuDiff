@@ -150,18 +150,21 @@ end
 function backward(node::BroadcastedOperator)
     f, x, out_grad = node.f, node.input, node.gradient
     if f == relu
-        x.gradient .+= out_grad .* (x.output .> 0)
+        δ = out_grad .* (x.output .> 0)
     elseif f == identity_fn
-        x.gradient .+= out_grad
+        δ = out_grad
     elseif f == sigmoid
-        σ = sigmoid(x.output)
-        x.gradient .+= out_grad .* σ .* (1 .- σ)
+        σ = node.output
+        δ = out_grad .* σ .* (1 .- σ)
     elseif f == tanh
-        x.gradient .+= out_grad .* (1 .- tanh.(x.output).^2)
+        δ = out_grad .* (1 .- node.output.^2)
     else
         error("Unsupported function in BroadcastedOperator backward: $f")
     end
+
+    x.gradient = isnothing(x.gradient) ? δ : x.gradient .+ δ
 end
+
 
 function backward!(nodes::Vector{GraphNode}, seed=1.0)
     for node in nodes
