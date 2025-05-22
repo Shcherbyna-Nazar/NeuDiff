@@ -12,9 +12,9 @@ function normalize(X)
 end
 
 X_train = load("data/imdb_dataset_prepared.jld2", "X_train")
-y_train = Float64.(load("data/imdb_dataset_prepared.jld2", "y_train"))
+y_train = load("data/imdb_dataset_prepared.jld2", "y_train")
 X_test  = load("data/imdb_dataset_prepared.jld2", "X_test")
-y_test  = Float64.(load("data/imdb_dataset_prepared.jld2", "y_test"))
+y_test  = load("data/imdb_dataset_prepared.jld2", "y_test")
 
 function create_batches(X, Y; batchsize=64, shuffle=true)
     idxs = collect(1:size(X, 2))

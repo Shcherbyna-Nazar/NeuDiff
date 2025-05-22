@@ -1,22 +1,19 @@
 module MyAD
 
 export GraphNode, Constant, Variable, ScalarOperator, MatMulOperator, BroadcastedOperator,
-       forward!, backward!, topological_sort, relu, sigmoid, identity_fn, broadcast_add
+    forward!, backward!, topological_sort, relu, sigmoid, identity_fn, broadcast_add
 
 # === Abstract Node Type ===
 abstract type GraphNode end
 
 # === Basic Nodes ===
 struct Constant{T} <: GraphNode
-    output :: T
-    Constant(x::T) where {T} = new{T}(x)
+    output::T
 end
 
-
-
 mutable struct Variable <: GraphNode
-    output :: Any
-    gradient :: Any
+    output::Any
+    gradient::Any
 end
 
 # === Operator Nodes ===
@@ -46,9 +43,19 @@ relu(x) = max.(0, x)
 sigmoid(x) = 1.0 ./ (1.0 .+ exp.(-x))
 identity_fn(x) = x
 
-# === Constructors ===
-ScalarOperator(f, args::GraphNode...) = ScalarOperator{typeof(f)}(f, collect(args), nothing, nothing)
-BroadcastedOperator(f::F, x::GraphNode) where {F} = BroadcastedOperator{F}(f, x, nothing, nothing)
+
+function ScalarOperator(f::Function, args::GraphNode...)
+    ScalarOperator{typeof(f)}(f, collect(args), nothing, nothing)
+end
+
+function MatMulOperator(A::GraphNode, B::GraphNode)
+    MatMulOperator(A, B, nothing, nothing)
+end
+
+function BroadcastedOperator(f::Function, x::GraphNode)
+    BroadcastedOperator{typeof(f)}(f, x, nothing, nothing)
+end
+
 
 # === Operator Overloading ===
 import Base: +, *, -, /, sin
@@ -94,21 +101,30 @@ function forward(node::BroadcastedOperator)
     node.output = node.f.(node.input.output)
 end
 
+function forward(node::GraphNode)
+    error("No forward method defined for node type $(typeof(node))")
+end
+
+function forward(node::Constant)
+    # Constants do not change, so no need to compute output
+    nothing
+end
+
+function forward(node::Variable)
+    # Variables are inputs, so we just return their output
+    nothing
+end
+
 function forward!(nodes::Vector{GraphNode})
     for node in nodes
-        if node isa ScalarOperator
-            forward(node)
-        elseif node isa MatMulOperator
-            forward(node)
-        elseif node isa BroadcastedOperator
-            forward(node)
-        end
+        forward(node)
     end
 end
 
-function broadcast_add(a::AbstractMatrix, b::AbstractMatrix)
-    return a .+ b
-end
+
+broadcast_add(a::AbstractMatrix, b::AbstractMatrix) = a .+ b
+
+
 
 # === Backward Pass ===
 function backward(node::ScalarOperator)
@@ -141,6 +157,7 @@ function backward(node::ScalarOperator)
     end
 end
 
+
 function backward(node::MatMulOperator)
     A, B, out_grad = node.A, node.B, node.gradient
     A.gradient .+= out_grad * B.output'
@@ -157,7 +174,7 @@ function backward(node::BroadcastedOperator)
         σ = node.output
         δ = out_grad .* σ .* (1 .- σ)
     elseif f == tanh
-        δ = out_grad .* (1 .- node.output.^2)
+        δ = out_grad .* (1 .- node.output .^ 2)
     else
         error("Unsupported function in BroadcastedOperator backward: $f")
     end
@@ -174,15 +191,23 @@ function backward!(nodes::Vector{GraphNode}, seed=1.0)
     end
     last(nodes).gradient = seed
     for node in reverse(nodes)
-        if node isa ScalarOperator
-            backward(node)
-        elseif node isa MatMulOperator
-            backward(node)
-        elseif node isa BroadcastedOperator
-            backward(node)
-        end
+        backward(node)  # no type checks
     end
 end
 
+
+function backward(node::GraphNode)
+    error("No backward method defined for node type $(typeof(node))")
+end
+
+function backward(node::Constant)
+    # Constants do not have gradients
+    nothing
+end
+
+function backward(node::Variable)
+    # Variables are inputs, so we do not compute gradients for them
+    nothing
+end
 
 end # module
