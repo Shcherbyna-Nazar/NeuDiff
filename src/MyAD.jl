@@ -106,12 +106,10 @@ function forward(node::GraphNode)
 end
 
 function forward(node::Constant)
-    # Constants do not change, so no need to compute output
     nothing
 end
 
 function forward(node::Variable)
-    # Variables are inputs, so we just return their output
     nothing
 end
 
@@ -191,7 +189,7 @@ function backward!(nodes::Vector{GraphNode}, seed=1.0)
     end
     last(nodes).gradient = seed
     for node in reverse(nodes)
-        backward(node)  # no type checks
+        backward(node) 
     end
 end
 
@@ -201,12 +199,10 @@ function backward(node::GraphNode)
 end
 
 function backward(node::Constant)
-    # Constants do not have gradients
     nothing
 end
 
 function backward(node::Variable)
-    # Variables are inputs, so we do not compute gradients for them
     nothing
 end
 

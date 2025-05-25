@@ -34,7 +34,7 @@ struct Dropout
 end
 
 function (d::Dropout)(x::MyAD.GraphNode)
-    return x  # dropout jest ignorowany w inferencji; za chwilę dodamy wersję treningową
+    return x 
 end
 
 
@@ -78,8 +78,8 @@ function zero_gradients!(model::Chain)
 end
 
 mutable struct AdamState
-    m::Vector{Matrix{Float64}}  # pierwszy moment (średnia gradientów)
-    v::Vector{Matrix{Float64}}  # drugi moment (średnia kwadratów gradientów)
+    m::Vector{Matrix{Float64}}  
+    v::Vector{Matrix{Float64}} 
     β1::Float64
     β2::Float64
     ϵ::Float64
