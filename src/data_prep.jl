@@ -2,7 +2,7 @@ module PrepareData
 
 using JLD2
 using TextAnalysis
-const Languages = TextAnalysis.Languages  # fix `Languages.English()`
+const Languages = TextAnalysis.Languages 
 
 export prepare_dataset
 
