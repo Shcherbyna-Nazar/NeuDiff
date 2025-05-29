@@ -3,19 +3,25 @@ include("src/MyNN.jl")
 using .MyAD, .MyNN
 using JLD2, Printf, Statistics, Random
 using TimerOutputs
-const TO = TimerOutput()
+using Profile
+using ProfileView  # GUI flame chart visualization
 
+const TO = TimerOutput()
 
 # === Load IMDB and GloVe data ===
 X_train = load("data/imdb_dataset_prepared.jld2", "X_train")
 y_train = load("data/imdb_dataset_prepared.jld2", "y_train")
-X_test  = load("data/imdb_dataset_prepared.jld2", "X_test")
-y_test  = load("data/imdb_dataset_prepared.jld2", "y_test")
 embeddings = load("data/imdb_dataset_prepared.jld2", "embeddings")
 vocab = load("data/imdb_dataset_prepared.jld2", "vocab")
+X_test = load("data/imdb_dataset_prepared.jld2", "X_test")
+y_test = load("data/imdb_dataset_prepared.jld2", "y_test")
 
 embedding_dim = size(embeddings, 1)
 vocab_size = length(vocab)
+
+using Printf, Statistics, Random
+using .MyAD
+using .MyNN
 
 # === Define model ===
 model = Chain(
@@ -64,36 +70,20 @@ for epoch in 1:epochs
     total_loss = 0.0
     total_acc = 0.0
     num_batches = 0
-    batches = create_batches(X_train, y_train, batchsize=batch_size)[1:10]
-    println("  → Training on $(length(batches)) batches of size $batch_size...")
 
+    batches = create_batches(X_train, y_train, batchsize=batch_size)
+    println("  → Training on $(length(batches)) batches of size $batch_size...")
+    
     t = @elapsed begin
         for (i, (x, y)) in enumerate(batches)
-            println("  → Batch $i")
+            # println("  → Batch $i")
+
             y_node = Variable(y, zeros(size(y)))
-            @timeit TO "forward pass" begin
-                out = model(x)
-                graph = topological_sort(out)
-                forward!(graph)
-                for node in graph
-                    if node isa MyAD.GraphNode
-                        in_shape = try
-                            node isa ScalarOperator ? join(map(n -> string(size(n.output)), node.inputs), ", ") :
-                            node isa MatMulOperator ? "$(size(node.A.output)), $(size(node.B.output))" :
-                            node isa BroadcastedOperator ? "$(size(node.input.output))" :
-                            node isa Conv1DOp ? "$(size(node.x.output))" :
-                            node isa MaxPool1DOp ? "$(size(node.x.output))" :
-                            "?"
-                        catch
-                            "?"
-                        end
+            out = model(x)
+            graph = topological_sort(out)
 
-                        out_shape = !isnothing(node.output) ? string(size(node.output)) : "none"
-                        println("✔️ ", typeof(node), " in: ", in_shape, " → out: ", out_shape)
-                    end
-                end
-
-            end
+            # println("    Forward pass...")
+            forward!(graph)
 
             ŷ = out.output
             loss = bce(ŷ, y)
@@ -103,13 +93,17 @@ for epoch in 1:epochs
             total_acc += acc
             num_batches += 1
 
-            println(@sprintf("    Train loss: %.4f | acc: %.4f", loss, acc))
+            # println(@sprintf("    Train loss: %.4f | acc: %.4f", loss, acc))
 
             out.gradient = bce_grad(ŷ, y)
             zero_gradients!(model)
+            # println("    Backward pass...")
+            backward!(graph, out.gradient)
 
-            @timeit TO "backward pass" backward!(graph, out.gradient)
-            @timeit TO "update params" update_adam!(state, params, η)
+            update_adam!(state, params, η)
+            if i%100 == 0
+                println(@sprintf("    Batch %d: loss = %.4f, acc = %.4f", i, loss, acc))
+            end
         end
     end
 
@@ -117,11 +111,9 @@ for epoch in 1:epochs
     train_acc = total_acc / num_batches
 
     println("  → Evaluation on test set...")
-    @timeit TO "eval forward" begin
-        out_eval = model(Matrix(X_test))  # jawnie konwertuj na Matrix, jeśli X_test' zostało ztransponowane
-
-        forward!(topological_sort(out_eval))
-    end
+    out_eval = model(Matrix(X_test, Float64))
+    # Ensure the output is a Variable for evaluation
+    forward!(topological_sort(out_eval))
     test_pred = out_eval.output
     test_loss = bce(test_pred, y_test)
     test_acc = accuracy(test_pred, y_test)
@@ -130,6 +122,4 @@ for epoch in 1:epochs
     println(@sprintf("🏋️  Train: loss = %.4f, acc = %.4f", train_loss, train_acc))
     println(@sprintf("🧪  Test : loss = %.4f, acc = %.4f\n", test_loss, test_acc))
 end
-
-show(TO)
 

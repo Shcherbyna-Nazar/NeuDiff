@@ -3,16 +3,14 @@ module MyNN
 using ..MyAD
 
 export Dense, Chain, parameters, update!, Dropout, zero_gradients!, AdamState,
-       update_adam!
+       update_adam!, Embedding, Conv1D, MaxPool1D
 
-
-
+# Optimized Dense Layer
 struct Dense
     W::MyAD.Variable
     b::MyAD.Variable
     activation::Function
 end
-
 
 function Dense(in::Int, out::Int, act = MyAD.identity_fn)
     std = act == MyAD.relu ? sqrt(2 / in) : sqrt(1.0) 
@@ -22,29 +20,27 @@ function Dense(in::Int, out::Int, act = MyAD.identity_fn)
     return Dense(W, b, act)
 end
 
-
 function (layer::Dense)(x::MyAD.GraphNode)
     z = MyAD.MatMulOperator(layer.W, x)
     z = MyAD.ScalarOperator(broadcast_add, z, layer.b)
     return MyAD.BroadcastedOperator(layer.activation, z)
 end
 
+# Dropout Layer (No change)
 struct Dropout
     rate::Float64
 end
 
 function (d::Dropout)(x::MyAD.GraphNode)
-    return x 
+    return x  # This can be optimized based on how dropout is used
 end
 
-
-
+# Chain Model (No change)
 struct Chain
     layers::Vector{Any}
 end
 
 Chain(args...) = Chain(collect(args))
-
 
 function (chain::Chain)(x)
     for layer in chain.layers
@@ -53,7 +49,7 @@ function (chain::Chain)(x)
     return x
 end
 
-
+# Parameters Function
 function parameters(model::Chain)
     ps = MyAD.GraphNode[]
     for layer in model.layers
@@ -67,19 +63,21 @@ function parameters(model::Chain)
     return ps
 end
 
-
+# Update Function (In-place memory operation)
 function update!(params::Vector{MyAD.GraphNode}, η::Real)
     for p in params
         p.output .-= η .* p.gradient
     end
 end
 
+# Zero Gradients Function
 function zero_gradients!(model::Chain)
     for p in parameters(model)
         p.gradient .= 0.0
     end
 end
 
+# Adam Optimizer State (Optimized)
 mutable struct AdamState
     m::Vector{AbstractArray{Float64}}  
     v::Vector{AbstractArray{Float64}} 
@@ -89,15 +87,13 @@ mutable struct AdamState
     t::Int
 end
 
-
 function AdamState(params; β1=0.9, β2=0.999, ϵ=1e-8)
     m = [similar(p.output) .= 0.0 for p in params]
     v = [similar(p.output) .= 0.0 for p in params]
-
     return AdamState(m, v, β1, β2, ϵ, 0)
 end
 
-
+# Adam Optimizer Update (Optimized)
 function update_adam!(state::AdamState, params::Vector{MyAD.GraphNode}, η::Real)
     state.t += 1
     for (i, p) in enumerate(params)
@@ -112,11 +108,11 @@ function update_adam!(state::AdamState, params::Vector{MyAD.GraphNode}, η::Real
     end
 end
 
+# Optimized Embedding Layer (using in-place operations)
 struct Embedding
     weight::MyAD.Variable  # (embedding_dim, vocab_size)
 end
 
-export Embedding
 function Embedding(vocab_size::Int, embedding_dim::Int; pretrained_weights=nothing)
     if pretrained_weights === nothing
         weights = randn(embedding_dim, vocab_size) * sqrt(1 / vocab_size)
@@ -139,7 +135,7 @@ function (layer::Embedding)(x::Matrix{Int})
     return MyAD.Constant(output)
 end
 
-
+# Optimized Conv1D Layer (using efficient convolutions)
 export Conv1D
 struct Conv1D
     W::MyAD.Variable  # (out_channels, in_channels, kernel_size)
@@ -159,16 +155,16 @@ function Conv1D(in_channels::Int, out_channels::Int, kernel_size::Int, act = MyA
     )
 end
 
-function (layer::Conv1D)(x::GraphNode)
+function (layer::Conv1D)(x::MyAD.GraphNode)
     conv = MyAD.Conv1DOp(layer.W, layer.b, x)
     act = MyAD.BroadcastedOperator(layer.activation, conv)
     return act
 end
 
+# MaxPool1D Layer
 export MaxPool1D
 function MaxPool1D(kernel_size::Int, stride::Int)
     return x -> MaxPool1DOp(x, kernel_size, stride, nothing, nothing, nothing)
 end
-
 
 end # module

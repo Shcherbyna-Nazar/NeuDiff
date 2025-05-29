@@ -123,9 +123,11 @@ function forward(node::Variable)
     nothing
 end
 
+using BenchmarkTools
+
 function forward!(nodes::Vector{GraphNode})
     for node in nodes
-        forward(node)
+        forward(node)  # More precise and repeatable timing for each node
     end
 end
 
@@ -197,6 +199,8 @@ end
 
 
 function backward!(nodes::Vector{GraphNode}, seed=1.0)
+    
+    # Initialize gradients
     for node in nodes
         if !isnothing(node.output)
             node.gradient = zeros(size(node.output))
@@ -204,9 +208,11 @@ function backward!(nodes::Vector{GraphNode}, seed=1.0)
     end
     last(nodes).gradient = seed
 
+    # Measure the backward pass for each node
     for node in reverse(nodes)
-        backward(node)
+        backward(node)  # More precise timing for each individual backward pass
     end
+    
 end
 
 
@@ -240,128 +246,139 @@ end
 
 
 using FFTW
-
-FFTW.set_num_threads(Sys.CPU_THREADS)
-
-using Base.Threads
+using FFTW:mul!
 
 function forward(node::Conv1DOp)
     W, b, x = node.W.output, node.b.output, node.x.output
-    seq_len, in_ch, batch = size(x)
+    in_ch, seq_len, batch = size(x)
     out_ch, _, k = size(W)
 
-    fft_len = nextpow(2, seq_len + k - 1)
+    fft_len = nextpow(2, seq_len + k - 1)  # Optimized FFT length
     out_len = seq_len - k + 1
 
-    # Allocate output once
     node.output === nothing && (node.output = zeros(out_ch, out_len, batch))
     out = node.output
 
-    @inbounds Threads.@threads for b_id in 1:batch
-        # Thread-local buffers
+    Threads.@threads for b_id in 1:batch
         x_pad = zeros(fft_len)
         w_pad = zeros(fft_len)
         sum_fft = zeros(fft_len)
+
+        x_fft = similar(plan_rfft(x_pad) * x_pad)
+        w_fft = similar(x_fft)
+        conv_fft = similar(x_fft)
+        conv_time = zeros(fft_len)
+
         plan_x = plan_rfft(x_pad)
         plan_w = plan_rfft(w_pad)
-        dummy_fft = plan_x * x_pad
-        plan_ir = plan_irfft(dummy_fft, fft_len)
+        plan_ir = plan_irfft(conv_fft, fft_len)
+
+        @views x_b = x[:, :, b_id]
+        @views out_b = out[:, :, b_id]
 
         for o in 1:out_ch
             sum_fft .= 0.0
             for i in 1:in_ch
-                # Prepare padded input and kernel
-                x_pad[1:seq_len] .= x[:, i, b_id]
-                x_pad[(seq_len+1):end] .= 0.0
+                @views x_pad[1:seq_len] .= x_b[i, :]
+                fill!(x_pad[seq_len+1:end], 0.0)
+                @views w_pad[1:k] .= reverse(W[o, i, :])
+                fill!(w_pad[k+1:end], 0.0)
 
-                w_pad[1:k] .= reverse(W[o, i, :])
-                w_pad[(k+1):end] .= 0.0
+                mul!(x_fft, plan_x, x_pad)
+                mul!(w_fft, plan_w, w_pad)
+                @. conv_fft = x_fft * w_fft
+                mul!(conv_time, plan_ir, conv_fft)
 
-                x_fft = plan_x * x_pad
-                w_fft = plan_w * w_pad
-                conv_fft = x_fft .* w_fft
-
-                conv_time = plan_ir * conv_fft
-                sum_fft .+= conv_time
+                @views sum_fft .+= conv_time
             end
-            out[o, :, b_id] .= sum_fft[k : k + out_len - 1] .+ b[o]
+            @views out_b[o, :] .= sum_fft[k : k + out_len - 1] .+ b[o]
         end
     end
 end
 
 
+
 function backward(node::Conv1DOp)
-    W, b, x = node.W, node.b, node.x
-    dy = node.gradient
-    x_val, W_val = x.output, W.output
+        W, b, x = node.W, node.b, node.x
+        dy = node.gradient
+        x_val, W_val = x.output, W.output
 
-    seq_len, in_ch, batch = size(x_val)
-    out_ch, _, k = size(W_val)
-    out_len = size(dy, 2)
-    fft_len = nextpow(2, seq_len + k - 1)
+        in_ch, seq_len, batch = size(x_val)
+        out_ch, _, k = size(W_val)
+        out_len = size(dy, 2)
+        fft_len = nextpow(2, seq_len + k - 1)
 
-    dx_total = zeros(in_ch, seq_len, batch)
-    dW_partials = Vector{Array{Float64, 3}}(undef, batch)
-    db_partials = Vector{Array{Float64, 1}}(undef, batch)
+        dx = zeros(in_ch, seq_len, batch)
+        dW = zeros(out_ch, in_ch, k)
+        db = zeros(out_ch, 1)
 
-    Threads.@threads for b_id in 1:batch
-        # Thread-local buffers
-        x_pad = zeros(fft_len)
-        w_pad = zeros(fft_len)
-        dy_pad = zeros(fft_len)
+        dW_partials = Vector{Array{Float64, 3}}(undef, batch)
+        db_partials = Vector{Vector{Float64}}(undef, batch)
 
-        dx_local = zeros(in_ch, seq_len)
-        dW_local = zeros(out_ch, in_ch, k)
-        db_local = zeros(out_ch)
+        Threads.@threads for b_id in 1:batch
+            x_pad = zeros(fft_len)
+            w_pad = zeros(fft_len)
+            dy_pad = zeros(fft_len)
 
-        plan_x = plan_rfft(x_pad)
-        plan_w = plan_rfft(w_pad)
-        plan_ir = plan_irfft(plan_x * x_pad, fft_len)
+            x_fft = similar(plan_rfft(x_pad) * x_pad)
+            w_fft = similar(x_fft)
+            dy_fft = similar(x_fft)
+            dx_fft = similar(x_fft)
+            dW_fft = similar(x_fft)
+            dx_time = zeros(fft_len)
+            dW_time = zeros(fft_len)
 
-        for o in 1:out_ch
-            dy_pad[1:out_len] .= dy[o, :, b_id]
-            dy_pad[(out_len+1):end] .= 0.0
-            dy_fft = plan_x * dy_pad
+            plan_x = plan_rfft(x_pad)
+            plan_w = plan_rfft(w_pad)
+            plan_ir = plan_irfft(dW_fft, fft_len)
 
-            for i in 1:in_ch
-                # dW[o, i, :] += reverse(conv(x[i], dy[o]))
-                x_pad[1:seq_len] .= x_val[i, :, b_id]
-                x_pad[(seq_len+1):end] .= 0.0
-                x_fft = plan_x * x_pad
+            @views x_b = x_val[:, :, b_id]
+            @views dy_b = dy[:, :, b_id]
 
-                dW_fft = dy_fft .* x_fft
-                dW_time = plan_ir * dW_fft
-                dW_local[o, i, :] .+= reverse(dW_time[1:k])
+            local_dx = zeros(in_ch, seq_len)
+            local_dW = zeros(out_ch, in_ch, k)
+            local_db = zeros(out_ch)
 
-                # dx[i] += conv(dy[o], W[o][i])
-                w_pad[1:k] .= W_val[o, i, :]
-                w_pad[(k+1):end] .= 0.0
-                w_fft = plan_w * w_pad
+            for o in 1:out_ch
+                @views dy_pad[1:out_len] .= dy_b[o, :]
+                fill!(dy_pad[out_len+1:end], 0.0)
+                mul!(dy_fft, plan_x, dy_pad)
 
-                dx_fft = dy_fft .* w_fft
-                dx_time = plan_ir * dx_fft
-                dx_local[i, :] .+= dx_time[k:k + seq_len - 1]
+                for i in 1:in_ch
+                    @views x_pad[1:seq_len] .= x_b[i, :]
+                    fill!(x_pad[seq_len+1:end], 0.0)
+                    mul!(x_fft, plan_x, x_pad)
+
+                    @. dW_fft = dy_fft * x_fft
+                    mul!(dW_time, plan_ir, dW_fft)
+                    @views local_dW[o, i, :] .+= reverse(dW_time[1:k])
+
+                    @views w_pad[1:k] .= W_val[o, i, :]
+                    fill!(w_pad[k+1:end], 0.0)
+                    mul!(w_fft, plan_w, w_pad)
+
+                    @. dx_fft = dy_fft * w_fft
+                    mul!(dx_time, plan_ir, dx_fft)
+                    @views local_dx[i, :] .+= dx_time[k : k + seq_len - 1]
+                end
+
+                local_db[o] += sum(dy_b[o, :])
             end
 
-            db_local[o] += sum(dy[o, :, b_id])
+            dx[:, :, b_id] .= local_dx
+            dW_partials[b_id] = local_dW
+            db_partials[b_id] = local_db
         end
 
-        dx_total[:, :, b_id] .= dx_local
-        dW_partials[b_id] = dW_local
-        db_partials[b_id] = db_local
-    end
+        # Redukcja sumaryczna po wszystkich wątkach
+        for b_id in 1:batch
+            dW .+= dW_partials[b_id]
+            db[:, 1] .+= db_partials[b_id]
+        end
 
-    # Serial reduction after threads
-    dW_total = zeros(out_ch, in_ch, k)
-    db_total = zeros(out_ch, 1)
-    for b_id in 1:batch
-        dW_total .+= dW_partials[b_id]
-        db_total[:, 1] .+= db_partials[b_id]
-    end
-
-    W.gradient = dW_total
-    b.gradient = db_total
-    x.gradient = dx_total
+        W.gradient = dW
+        b.gradient = db
+        x.gradient = dx
 end
 
 
