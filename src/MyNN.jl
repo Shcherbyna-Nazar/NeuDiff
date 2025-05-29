@@ -60,6 +60,9 @@ function parameters(model::Chain)
         if layer isa Dense
             push!(ps, layer.W, layer.b)
         end
+        if layer isa Conv1D
+            push!(ps, layer.W, layer.b)
+        end
     end
     return ps
 end
@@ -78,8 +81,8 @@ function zero_gradients!(model::Chain)
 end
 
 mutable struct AdamState
-    m::Vector{Matrix{Float64}}  
-    v::Vector{Matrix{Float64}} 
+    m::Vector{AbstractArray{Float64}}  
+    v::Vector{AbstractArray{Float64}} 
     β1::Float64
     β2::Float64
     ϵ::Float64
@@ -88,8 +91,9 @@ end
 
 
 function AdamState(params; β1=0.9, β2=0.999, ϵ=1e-8)
-    m = [zero(p.output) for p in params]
-    v = [zero(p.output) for p in params]
+    m = [similar(p.output) .= 0.0 for p in params]
+    v = [similar(p.output) .= 0.0 for p in params]
+
     return AdamState(m, v, β1, β2, ϵ, 0)
 end
 
@@ -106,6 +110,64 @@ function update_adam!(state::AdamState, params::Vector{MyAD.GraphNode}, η::Real
 
         p.output .-= η .* m_hat ./ (sqrt.(v_hat) .+ state.ϵ)
     end
+end
+
+struct Embedding
+    weight::MyAD.Variable  # (embedding_dim, vocab_size)
+end
+
+export Embedding
+function Embedding(vocab_size::Int, embedding_dim::Int; pretrained_weights=nothing)
+    if pretrained_weights === nothing
+        weights = randn(embedding_dim, vocab_size) * sqrt(1 / vocab_size)
+    else
+        weights = pretrained_weights
+    end
+    w_var = MyAD.Variable(weights, zeros(size(weights)))
+    return Embedding(w_var)
+end
+
+function (layer::Embedding)(x::Matrix{Int})
+    # Flatten and index directly
+    word_idxs = vec(x)  # shape: (seq_len * batch_size)
+    emb = layer.weight.output[:, word_idxs]  # (embedding_dim, seq_len * batch_size)
+    
+    # Reshape to (embedding_dim, seq_len, batch_size)
+    seq_len, batch_size = size(x)
+    output = reshape(emb, size(emb, 1), seq_len, batch_size)
+    
+    return MyAD.Constant(output)
+end
+
+
+export Conv1D
+struct Conv1D
+    W::MyAD.Variable  # (out_channels, in_channels, kernel_size)
+    b::MyAD.Variable  # (out_channels, 1)
+    activation::Function
+end
+
+function Conv1D(in_channels::Int, out_channels::Int, kernel_size::Int, act = MyAD.identity_fn)
+    std = act == MyAD.relu ? sqrt(2 / (in_channels * kernel_size)) : 1.0
+    W = randn(out_channels, in_channels, kernel_size) * std
+    b = zeros(out_channels, 1)
+
+    return Conv1D(
+        MyAD.Variable(W, zeros(size(W))),
+        MyAD.Variable(b, zeros(size(b))),
+        act
+    )
+end
+
+function (layer::Conv1D)(x::GraphNode)
+    conv = MyAD.Conv1DOp(layer.W, layer.b, x)
+    act = MyAD.BroadcastedOperator(layer.activation, conv)
+    return act
+end
+
+export MaxPool1D
+function MaxPool1D(kernel_size::Int, stride::Int)
+    return x -> MaxPool1DOp(x, kernel_size, stride, nothing, nothing, nothing)
 end
 
 
