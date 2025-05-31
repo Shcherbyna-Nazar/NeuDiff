@@ -127,11 +127,11 @@ function (layer::Embedding)(x::Matrix{Int})
     # Flatten and index directly
     word_idxs = vec(x)  # shape: (seq_len * batch_size)
     emb = layer.weight.output[:, word_idxs]  # (embedding_dim, seq_len * batch_size)
-    
+
     # Reshape to (embedding_dim, seq_len, batch_size)
     seq_len, batch_size = size(x)
     output = reshape(emb, size(emb, 1), seq_len, batch_size)
-    
+
     return MyAD.Constant(output)
 end
 
@@ -164,7 +164,7 @@ end
 # MaxPool1D Layer
 export MaxPool1D
 function MaxPool1D(kernel_size::Int, stride::Int)
-    return x -> MaxPool1DOp(x, kernel_size, stride, nothing, nothing, nothing)
+    return x -> MyAD.MaxPool1DOp(x, kernel_size, stride, nothing, nothing, nothing)
 end
 
 end # module
