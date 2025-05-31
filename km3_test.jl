@@ -13,15 +13,16 @@ X_train = load("data/imdb_dataset_prepared.jld2", "X_train")
 y_train = load("data/imdb_dataset_prepared.jld2", "y_train")
 embeddings = load("data/imdb_dataset_prepared.jld2", "embeddings")
 vocab = load("data/imdb_dataset_prepared.jld2", "vocab")
+
+# Ensure X_train and X_test are of type Matrix{Int}
+X_train = Matrix{Int}(X_train)  # Convert to Matrix{Int}
+X_test = Matrix{Int}(load("data/imdb_dataset_prepared.jld2", "X_test"))  # Convert to Matrix{Int}
+
 X_test = load("data/imdb_dataset_prepared.jld2", "X_test")
 y_test = load("data/imdb_dataset_prepared.jld2", "y_test")
 
 embedding_dim = size(embeddings, 1)
 vocab_size = length(vocab)
-
-using Printf, Statistics, Random
-using .MyAD
-using .MyNN
 
 # === Define model ===
 model = Chain(
@@ -31,7 +32,6 @@ model = Chain(
     flatten_last_two_dims,
     Dense(128, 1, sigmoid)
 )
-
 
 # === Define loss and accuracy ===
 function bce(ŷ, y)
@@ -49,7 +49,8 @@ accuracy(ŷ, y) = mean((ŷ .> 0.5) .== (y .> 0.5))
 
 # === Training settings ===
 params = parameters(model)
-state = AdamState(params)
+# Try fine-tuning Adam parameters
+state = AdamState(params, β1=0.8, β2=0.999, ϵ=1e-7)
 epochs = 5
 η = 0.001
 batch_size = 64
@@ -60,7 +61,7 @@ function create_batches(X, Y; batchsize=64, shuffle=true)
         Random.shuffle!(idxs)
     end
     return [(X[:, idxs[i:min(i+batchsize-1, end)]],
-             Y[:, idxs[i:min(i+batchsize-1, end)]])
+             Y[:, idxs[i:min(i+batchsize-1, end)]] )
              for i in 1:batchsize:length(idxs)]
 end
 
@@ -73,7 +74,7 @@ for epoch in 1:epochs
 
     batches = create_batches(X_train, y_train, batchsize=batch_size)
     println("  → Training on $(length(batches)) batches of size $batch_size...")
-    
+
     t = @elapsed begin
         for (i, (x, y)) in enumerate(batches)
             # println("  → Batch $i")
@@ -101,7 +102,7 @@ for epoch in 1:epochs
             backward!(graph, out.gradient)
 
             update_adam!(state, params, η)
-            if i%100 == 0
+            if i % 100 == 0
                 println(@sprintf("    Batch %d: loss = %.4f, acc = %.4f", i, loss, acc))
             end
         end
@@ -111,7 +112,9 @@ for epoch in 1:epochs
     train_acc = total_acc / num_batches
 
     println("  → Evaluation on test set...")
-    out_eval = model(Matrix(X_test, Float64))
+    
+    # Ensure X_test is in the correct type for Embedding layer
+    out_eval = model(Matrix{Int}(X_test))  # Ensure X_test is in Matrix{Int} format
     # Ensure the output is a Variable for evaluation
     forward!(topological_sort(out_eval))
     test_pred = out_eval.output
@@ -122,4 +125,3 @@ for epoch in 1:epochs
     println(@sprintf("🏋️  Train: loss = %.4f, acc = %.4f", train_loss, train_acc))
     println(@sprintf("🧪  Test : loss = %.4f, acc = %.4f\n", test_loss, test_acc))
 end
-
