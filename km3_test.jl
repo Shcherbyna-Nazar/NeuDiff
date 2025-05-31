@@ -49,8 +49,8 @@ accuracy(ŷ, y) = mean((ŷ .> 0.5) .== (y .> 0.5))
 
 # === Training settings ===
 params = parameters(model)
-# Try fine-tuning Adam parameters
-state = AdamState(params, β1=0.8, β2=0.999, ϵ=1e-7)
+# Try fine-tuning Adam 
+state = AdamState(params)
 epochs = 5
 η = 0.001
 batch_size = 64

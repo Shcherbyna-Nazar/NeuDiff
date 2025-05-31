@@ -219,156 +219,84 @@ function backward(node::Variable)
     nothing
 end
 
-# === Conv1D Operation ===
 mutable struct Conv1DOp <: GraphNode
     W::Variable                     # (out_ch, in_ch, kernel)
     b::Variable                     # (out_ch, 1)
     x::GraphNode                    # (in_ch, seq_len, batch)
     kernel_size::Int
+    stride::Int
     output::Any
     gradient::Any
 end
 
-function Conv1DOp(W::Variable, b::Variable, x::GraphNode)
+function Conv1DOp(W::Variable, b::Variable, x::GraphNode; stride=1)
     _, _, k = size(W.output)
-    Conv1DOp(W, b, x, k, nothing, nothing)
+    Conv1DOp(W, b, x, k, stride, nothing, nothing)
 end
 
-using FFTW
-using FFTW:mul!
+function im2col1d(x::AbstractArray{T, 3}, kernel_size::Int, stride::Int) where T
+    in_ch, seq_len, batch = size(x)
+    out_len = div(seq_len - kernel_size, stride) + 1
+    col = Array{T}(undef, in_ch * kernel_size, out_len * batch)
 
-# === Optimized Conv1D Forward Pass with FFT ===
+    for b in 1:batch
+        for i in 0:out_len - 1
+            col_idx = b + i * batch
+            patch = x[:, i*stride+1:i*stride+kernel_size, b]
+            col[:, col_idx] .= reshape(patch, in_ch * kernel_size)
+        end
+    end
+    return col, out_len
+end
+
+function col2im1d(dx_col::AbstractArray{T, 2}, in_ch::Int, seq_len::Int, kernel_size::Int, stride::Int, batch::Int) where T
+    out_len = size(dx_col, 2) ÷ batch
+    dx = zeros(T, in_ch, seq_len, batch)
+    for b in 1:batch
+        for i in 0:out_len - 1
+            col_idx = b + i * batch
+            patch = reshape(dx_col[:, col_idx], (in_ch, kernel_size))
+            dx[:, i*stride+1:i*stride+kernel_size, b] .+= patch
+        end
+    end
+    return dx
+end
+
 function forward(node::Conv1DOp)
     W, b, x = node.W.output, node.b.output, node.x.output
-    in_ch, seq_len, batch = size(x)
-    out_ch, _, k = size(W)
+    out_ch, in_ch, k = size(W)
+    in_ch2, seq_len, batch = size(x)
+    @assert in_ch == in_ch2
 
-    fft_len = nextpow(2, seq_len + k - 1)  # Optimized FFT length
-    out_len = seq_len - k + 1
+    X_col, out_len = im2col1d(x, k, node.stride)
+    W_mat = reshape(W, out_ch, in_ch * k)
 
-    node.output === nothing && (node.output = zeros(out_ch, out_len, batch))
-    out = node.output
-
-    Threads.@threads for b_id in 1:batch
-        x_pad = zeros(fft_len)
-        w_pad = zeros(fft_len)
-        sum_fft = zeros(fft_len)
-
-        x_fft = similar(plan_rfft(x_pad) * x_pad)
-        w_fft = similar(x_fft)
-        conv_fft = similar(x_fft)
-        conv_time = zeros(fft_len)
-
-        plan_x = plan_rfft(x_pad)
-        plan_w = plan_rfft(w_pad)
-        plan_ir = plan_irfft(conv_fft, fft_len)
-
-        @views x_b = x[:, :, b_id]
-        @views out_b = out[:, :, b_id]
-
-        for o in 1:out_ch
-            sum_fft .= 0.0
-            for i in 1:in_ch
-                @views x_pad[1:seq_len] .= x_b[i, :]
-                fill!(x_pad[seq_len+1:end], 0.0)
-                @views w_pad[1:k] .= reverse(W[o, i, :])
-                fill!(w_pad[k+1:end], 0.0)
-
-                mul!(x_fft, plan_x, x_pad)
-                mul!(w_fft, plan_w, w_pad)
-                @. conv_fft = x_fft * w_fft
-                mul!(conv_time, plan_ir, conv_fft)
-
-                @views sum_fft .+= conv_time
-            end
-            @views out_b[o, :] .= sum_fft[k : k + out_len - 1] .+ b[o]
-        end
-    end
+    out = W_mat * X_col
+    out .= out .+ b
+    node.output = reshape(out, out_ch, out_len, batch)
 end
 
-# === Optimized Conv1D Backward Pass ===
 function backward(node::Conv1DOp)
     W, b, x = node.W, node.b, node.x
-    dy = node.gradient
     x_val, W_val = x.output, W.output
+    dy = reshape(node.gradient, size(node.output, 1), :)  # (out_ch, out_len * batch)
 
-    in_ch, seq_len, batch = size(x_val)
-    out_ch, _, k = size(W_val)
-    out_len = size(dy, 2)
-    fft_len = nextpow(2, seq_len + k - 1)
+    out_ch, in_ch, k = size(W_val)
+    in_ch2, seq_len, batch = size(x_val)
+    @assert in_ch == in_ch2
 
-    dx = zeros(in_ch, seq_len, batch)
-    dW = zeros(out_ch, in_ch, k)
-    db = zeros(out_ch, 1)
+    X_col, out_len = im2col1d(x_val, k, node.stride)
+    dW = dy * X_col'
+    db = sum(dy, dims=2)
+    dX_col = reshape(W_val, out_ch, in_ch * k)' * dy
+    dx = col2im1d(dX_col, in_ch, seq_len, k, node.stride, batch)
 
-    dW_partials = Vector{Array{Float64, 3}}(undef, batch)
-    db_partials = Vector{Vector{Float64}}(undef, batch)
-
-    Threads.@threads for b_id in 1:batch
-        x_pad = zeros(fft_len)
-        w_pad = zeros(fft_len)
-        dy_pad = zeros(fft_len)
-
-        x_fft = similar(plan_rfft(x_pad) * x_pad)
-        w_fft = similar(x_fft)
-        dy_fft = similar(x_fft)
-        dx_fft = similar(x_fft)
-        dW_fft = similar(x_fft)
-        dx_time = zeros(fft_len)
-        dW_time = zeros(fft_len)
-
-        plan_x = plan_rfft(x_pad)
-        plan_w = plan_rfft(w_pad)
-        plan_ir = plan_irfft(dW_fft, fft_len)
-
-        @views x_b = x_val[:, :, b_id]
-        @views dy_b = dy[:, :, b_id]
-
-        local_dx = zeros(in_ch, seq_len)
-        local_dW = zeros(out_ch, in_ch, k)
-        local_db = zeros(out_ch)
-
-        for o in 1:out_ch
-            @views dy_pad[1:out_len] .= dy_b[o, :]
-            fill!(dy_pad[out_len+1:end], 0.0)
-            mul!(dy_fft, plan_x, dy_pad)
-
-            for i in 1:in_ch
-                @views x_pad[1:seq_len] .= x_b[i, :]
-                fill!(x_pad[seq_len+1:end], 0.0)
-                mul!(x_fft, plan_x, x_pad)
-
-                @. dW_fft = dy_fft * x_fft
-                mul!(dW_time, plan_ir, dW_fft)
-                @views local_dW[o, i, :] .+= reverse(dW_time[1:k])
-
-                @views w_pad[1:k] .= W_val[o, i, :]
-                fill!(w_pad[k+1:end], 0.0)
-                mul!(w_fft, plan_w, w_pad)
-
-                @. dx_fft = dy_fft * w_fft
-                mul!(dx_time, plan_ir, dx_fft)
-                @views local_dx[i, :] .+= dx_time[k : k + seq_len - 1]
-            end
-
-            local_db[o] += sum(dy_b[o, :])
-        end
-
-        dx[:, :, b_id] .= local_dx
-        dW_partials[b_id] = local_dW
-        db_partials[b_id] = local_db
-    end
-
-    # Redukcja sumaryczna po wszystkich wątkach
-    for b_id in 1:batch
-        dW .+= dW_partials[b_id]
-        db[:, 1] .+= db_partials[b_id]
-    end
-
-    W.gradient = dW
+    W.gradient = reshape(dW, size(W_val))
     b.gradient = db
-    x.gradient = dx
+    x.gradient = isnothing(x.gradient) ? dx : x.gradient .+ dx
 end
+
+
 
 # === Other Operations (Flatten, MaxPool1D, etc.) remain similar ===
 
