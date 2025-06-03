@@ -261,6 +261,9 @@ function Conv1D(in_channels, out_channels, kernel::Int, activation=identity;
     return x -> Conv1DOp(W, b, x, kernel, stride, padding, activation, nothing, nothing, nothing)
 
 end
+
+using Base.Threads: @threads
+
 function forward(node::Conv1DOp)
     @inbounds begin
         x = node.input.output
@@ -283,8 +286,7 @@ function forward(node::Conv1DOp)
         end
         X_col = node.X_col
 
-
-        for bidx in 1:B
+        @threads for bidx in 1:B
             col = 1
             for i in 1:S:(L_p - K + 1)
                 patch = @view x_padded[i:i+K-1, :, bidx]
@@ -292,13 +294,12 @@ function forward(node::Conv1DOp)
                 col += 1
             end
         end
-        node.X_col = X_col
 
         W_mat = reshape(W, size(W, 1), :)
         out_mat = W_mat * X_col
 
         if b !== nothing
-            for bidx in 1:B
+            @threads for bidx in 1:B
                 @views out_mat[:, (bidx-1)*L_out+1:bidx*L_out] .+= b
             end
         end
@@ -307,6 +308,7 @@ function forward(node::Conv1DOp)
         node.output = node.activation(permutedims(out, (2,1,3)))
     end
 end
+
 
 
 function backward(node::Conv1DOp)
@@ -331,7 +333,7 @@ function backward(node::Conv1DOp)
             error("Unsupported activation function")
         end
 
-        δy_mat = permutedims(δy, (2, 1, 3))  # (O, L_out, B)    
+        δy_mat = permutedims(δy, (2, 1, 3))  # (O, L_out, B)
         δy_mat = reshape(δy_mat, O, L_out * B)
 
         X_col = node.X_col
@@ -347,7 +349,8 @@ function backward(node::Conv1DOp)
         dX_col = W_mat' * δy_mat  # (C*K, L_out * B)
 
         dx_padded = zeros(L + 2P, C, B)
-        for bidx in 1:B
+
+        @threads for bidx in 1:B
             col = 1
             for i in 1:S:(L + 2P - K + 1)
                 patch = reshape(dX_col[:, (bidx-1)*L_out + col], K, C)
@@ -360,6 +363,7 @@ function backward(node::Conv1DOp)
         node.input.gradient = isnothing(node.input.gradient) ? dx : node.input.gradient .+ dx
     end
 end
+
 
 
 mutable struct MaxPool1DOp{T} <: GraphNode
@@ -396,23 +400,21 @@ function forward(node::MaxPool1DOp)
         if node.indices === nothing || size(node.indices) != (out_len, C, B)
             node.indices = zeros(Int, out_len, C, B)
         end
+
         out = node.output
         idx = node.indices
 
-
-        out = reshape(out, out_len, C, B)
-        idx = reshape(idx, out_len, C, B)
-
-        for b in 1:B, c in 1:C, i in 0:out_len-1
-            r = i*s + 1 : i*s + k
-            win = @view x[r, c, b]
-            max_val, max_idx = findmax(win)
-            out[i+1, c, b] = max_val
-            idx[i+1, c, b] = r.start + max_idx - 1
+        @threads for b in 1:B
+            for c in 1:C
+                for i in 0:out_len-1
+                    r = i*s + 1 : i*s + k
+                    win = @view x[r, c, b]
+                    max_val, max_idx = findmax(win)
+                    out[i+1, c, b] = max_val
+                    idx[i+1, c, b] = r.start + max_idx - 1
+                end
+            end
         end
-
-        node.output = out
-        node.indices = idx
     end
 end
 
@@ -425,13 +427,19 @@ function backward(node::MaxPool1DOp)
         L_out, C, B = size(dy)
 
         dx = zeros(size(x.output))
-        for b in 1:B, c in 1:C, i in 1:L_out
-            dx[idx[i, c, b], c, b] += dy[i, c, b]
+
+        @threads for b in 1:B
+            for c in 1:C
+                for i in 1:L_out
+                    dx[idx[i, c, b], c, b] += dy[i, c, b]
+                end
+            end
         end
 
         x.gradient = isnothing(x.gradient) ? dx : x.gradient .+ dx
     end
 end
+
 
 
 # === PermuteDimsOp
