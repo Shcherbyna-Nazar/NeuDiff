@@ -11,45 +11,55 @@ abstract type GraphNode end
 # === Basic Nodes ===
 mutable struct Constant{T} <: GraphNode
     output::T
-    gradient::Any
+    gradient::Union{Nothing, T}
 end
 
-Constant(x) = Constant(x, nothing)
+Constant(x::T) where T = Constant{T}(x, nothing)
 
-mutable struct Variable <: GraphNode
-    output::Any
-    gradient::Any
+mutable struct Variable{T} <: GraphNode
+    output::AbstractArray{T}
+    gradient::AbstractArray{T}
 end
+
+Variable(x::AbstractArray{T}, g::AbstractArray{T}) where {T} = Variable{T}(x, g)
+
+
 
 # === Scalar Operator ===
-mutable struct ScalarOperator{F} <: GraphNode
+mutable struct ScalarOperator{F, T} <: GraphNode
     f::F
     inputs::Vector{GraphNode}
-    output::Any
-    gradient::Any
+    output::Union{Nothing, T}
+    gradient::Union{Nothing, T}
 end
 
-ScalarOperator(f::Function, args::GraphNode...) = ScalarOperator{typeof(f)}(f, collect(args), nothing, nothing)
+ScalarOperator(f::Function, args::GraphNode...) =
+    ScalarOperator{typeof(f), Any}(f, collect(args), nothing, nothing)
+
 
 # === Matrix Multiplication Operator ===
-mutable struct MatMulOperator <: GraphNode
+mutable struct MatMulOperator{T} <: GraphNode
     A::GraphNode
     B::GraphNode
-    output::Any
-    gradient::Any
+    output::Union{Nothing, T}
+    gradient::Union{Nothing, T}
 end
 
-MatMulOperator(A::GraphNode, B::GraphNode) = MatMulOperator(A, B, nothing, nothing)
+MatMulOperator(A::GraphNode, B::GraphNode) =
+    MatMulOperator{Any}(A, B, nothing, nothing)
+
 
 # === Broadcasted Operator ===
-mutable struct BroadcastedOperator{F} <: GraphNode
+mutable struct BroadcastedOperator{F, T} <: GraphNode
     f::F
     input::GraphNode
-    output::Any
-    gradient::Any
+    output::Union{Nothing, T}
+    gradient::Union{Nothing, T}
 end
 
-BroadcastedOperator(f::Function, x::GraphNode) = BroadcastedOperator{typeof(f)}(f, x, nothing, nothing)
+BroadcastedOperator(f::Function, x::GraphNode) =
+    BroadcastedOperator{typeof(f), Any}(f, x, nothing, nothing)
+
 
 # === Activation Functions ===
 relu(x) = max.(0, x)
@@ -206,14 +216,15 @@ function backward(node::GraphNode)
 end
 
 # === Flatten
-mutable struct FlattenOp <: GraphNode
+mutable struct FlattenOp{T} <: GraphNode
     x::GraphNode
     orig_shape::Tuple
-    output::Any
-    gradient::Any
+    output::Union{Nothing, T}
+    gradient::Union{Nothing, T}
 end
 
-flatten_last_two_dims(x::GraphNode) = FlattenOp(x, (), nothing, nothing)
+flatten_last_two_dims(x::GraphNode) = FlattenOp{Any}(x, (), nothing, nothing)
+
 
 function forward(node::FlattenOp)
     node.orig_shape = size(node.x.output)
@@ -227,20 +238,17 @@ end
 
 
 
-# Conv1DOp z layoutem jak w Flux (L, C, B)
-# Conv1DOp z layoutem jak w Flux (L, C, B)
-
-mutable struct Conv1DOp <: GraphNode
-    W::Variable
-    b::Union{Variable, Nothing}
+mutable struct Conv1DOp{T} <: GraphNode
+    W::Variable{T}
+    b::Union{Variable{T}, Nothing}
     input::GraphNode
     kernel::Int
     stride::Int
     padding::Int
     activation::Function
-    output::Any
-    gradient::Any
-    X_col::Any  # ← DODAJ TO POLE
+    output::Union{Nothing, AbstractArray{T}}
+    gradient::Union{Nothing, AbstractArray{T}}
+    X_col::Union{Nothing, AbstractArray{T}}
 end
 
 
@@ -354,13 +362,25 @@ function backward(node::Conv1DOp)
 end
 
 
-mutable struct MaxPool1DOp <: GraphNode
+mutable struct MaxPool1DOp{T} <: GraphNode
     x::GraphNode
     kernel_size::Int
     stride::Int
-    output::Any
-    gradient::Any
-    indices::Any
+    output::Union{Nothing, T}
+    gradient::Union{Nothing, T}
+    indices::Union{Nothing, Array{Int}}
+end
+
+# ← типовой (универсальный)
+function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int,
+                     output::Union{Nothing, T}, gradient::Union{Nothing, T},
+                     indices::Union{Nothing, Array{Int}}) where {T}
+    return MaxPool1DOp{T}(x, kernel_size, stride, output, gradient, indices)
+end
+
+# ← fallback с T = Any (для пустых данных)
+function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int)
+    return MaxPool1DOp{Any}(x, kernel_size, stride, nothing, nothing, nothing)
 end
 
 function forward(node::MaxPool1DOp)
@@ -415,14 +435,16 @@ end
 
 
 # === PermuteDimsOp
-mutable struct PermuteDimsOp <: GraphNode
+mutable struct PermuteDimsOp{T} <: GraphNode
     x::GraphNode
     dims::NTuple{3, Int}
-    output::Any
-    gradient::Any
+    output::Union{Nothing, T}
+    gradient::Union{Nothing, T}
 end
 
-PermuteDimsOp(x::GraphNode, dims::NTuple{3, Int}) = PermuteDimsOp(x, dims, nothing, nothing)
+PermuteDimsOp(x::GraphNode, dims::NTuple{3, Int}) =
+    PermuteDimsOp{Any}(x, dims, nothing, nothing)
+
 
 function forward(node::PermuteDimsOp)
     node.output = permutedims(node.x.output, node.dims)
@@ -434,13 +456,20 @@ function backward(node::PermuteDimsOp)
     node.x.gradient = isnothing(node.x.gradient) ? grad : node.x.gradient .+ grad
 end
 
-mutable struct EmbeddingOp <: GraphNode
-    weight::Variable
+mutable struct EmbeddingOp{T} <: GraphNode
+    weight::Variable{T}
     indices::Vector{Int}
-    shape::Tuple  # ✅ dopuszcza dowolny wymiar (2D, 3D...)
-    output::Any
-    gradient::Any
+    shape::Tuple
+    output::Union{Nothing, AbstractArray{T}}
+    gradient::Union{Nothing, AbstractArray{T}}
 end
+
+
+
+function EmbeddingOp(weight::Variable{T}, indices::Vector{Int}, shape::Tuple) where {T}
+    return EmbeddingOp{T}(weight, indices, shape, nothing, nothing)
+end
+
 
 
 

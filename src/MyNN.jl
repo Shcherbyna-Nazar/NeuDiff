@@ -119,20 +119,22 @@ end
 
 function Embedding(vocab_size::Int, embedding_dim::Int; pretrained_weights=nothing)
     if pretrained_weights === nothing
-        weights = randn(embedding_dim, vocab_size) * sqrt(1 / vocab_size)
+        weights = randn(Float32, embedding_dim, vocab_size) * sqrt(1 / vocab_size)
     else
         weights = pretrained_weights
     end
-    w_var = MyAD.Variable(weights, zeros(size(weights)))
+    zeros_like = zeros(eltype(weights), size(weights))
+    w_var = MyAD.Variable(weights, zeros_like)
     return Embedding(w_var)
 end
+
 
 function (layer::Embedding)(x::Matrix{Int})
     word_idxs = vec(x)  # shape: seq_len * batch_size
     seq_len, batch_size = size(x)
     shape = (size(layer.weight.output, 1), seq_len, batch_size)  # (embedding_dim, L, B)
     
-    return MyAD.EmbeddingOp(layer.weight, word_idxs, shape, nothing, nothing)
+    return MyAD.EmbeddingOp(layer.weight, word_idxs, shape)
 end
 
 
@@ -146,7 +148,7 @@ end
 
 function Conv1D(in_channels::Int, out_channels::Int, kernel_size::Int, act = MyAD.identity_fn)
     std = act == MyAD.relu ? sqrt(2 / (in_channels * kernel_size)) : 1.0
-    W = randn(out_channels, in_channels, kernel_size) * std
+    W = randn(Float32, out_channels, in_channels, kernel_size) * std
     b = zeros(out_channels, 1)
 
     return Conv1D(
@@ -169,7 +171,8 @@ end
 # MaxPool1D Layer
 export MaxPool1D
 function MaxPool1D(kernel_size::Int, stride::Int)
-    return x -> MyAD.MaxPool1DOp(x, kernel_size, stride, nothing, nothing, nothing)
+    return x -> MyAD.MaxPool1DOp(x, kernel_size, stride)
 end
+
 
 end # module
