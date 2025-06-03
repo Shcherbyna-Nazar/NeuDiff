@@ -45,6 +45,7 @@ Chain(args...) = Chain(collect(args))
 function (chain::Chain)(x)
     for layer in chain.layers
         x = layer(x)
+        # Show the type and output shape of the layer
     end
     return x
 end
@@ -58,6 +59,9 @@ function parameters(model::Chain)
         end
         if layer isa Conv1D
             push!(ps, layer.W, layer.b)
+        end
+        if layer isa Embedding
+            push!(ps, layer.weight)
         end
     end
     return ps
@@ -124,16 +128,13 @@ function Embedding(vocab_size::Int, embedding_dim::Int; pretrained_weights=nothi
 end
 
 function (layer::Embedding)(x::Matrix{Int})
-    # Flatten and index directly
-    word_idxs = vec(x)  # shape: (seq_len * batch_size)
-    emb = layer.weight.output[:, word_idxs]  # (embedding_dim, seq_len * batch_size)
-
-    # Reshape to (embedding_dim, seq_len, batch_size)
+    word_idxs = vec(x)  # shape: seq_len * batch_size
     seq_len, batch_size = size(x)
-    output = reshape(emb, size(emb, 1), seq_len, batch_size)
-
-    return MyAD.Constant(output)
+    shape = (size(layer.weight.output, 1), seq_len, batch_size)  # (embedding_dim, L, B)
+    
+    return MyAD.EmbeddingOp(layer.weight, word_idxs, shape, nothing, nothing)
 end
+
 
 # Optimized Conv1D Layer (using efficient convolutions)
 export Conv1D
@@ -156,10 +157,14 @@ function Conv1D(in_channels::Int, out_channels::Int, kernel_size::Int, act = MyA
 end
 
 function (layer::Conv1D)(x::MyAD.GraphNode)
-    conv = MyAD.Conv1DOp(layer.W, layer.b, x)
-    act = MyAD.BroadcastedOperator(layer.activation, conv)
-    return act
+    return MyAD.Conv1DOp(layer.W, layer.b, x,
+                         size(layer.W.output, 3),  # kernel size
+                         1,  # default stride
+                         0,  # default padding
+                         layer.activation,
+                         nothing, nothing, nothing)
 end
+
 
 # MaxPool1D Layer
 export MaxPool1D
