@@ -42,17 +42,9 @@ function bce(ŷ, y)
 end
 
 function bce_grad(ŷ, y)
-    ϵ = 1e-7
-    ŷ_clamped = clamp.(ŷ, ϵ, 1 .- ϵ)  # избегаем деления на 0
-
-    grad = (ŷ_clamped .- y) ./ (ŷ_clamped .* (1 .- ŷ_clamped)) ./ size(y, 2)
-
-    if any(isnan.(grad))
-        @warn "NaN in BCE grad!" ŷ y grad
-    end
-
-    return grad
+    return (ŷ .- y) ./ length(y)
 end
+
 
 
 

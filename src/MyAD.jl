@@ -244,6 +244,7 @@ mutable struct Conv1DOp <: GraphNode
 end
 
 
+
 function Conv1D(in_channels, out_channels, kernel::Int, activation=identity;
                 stride=1, padding=0)
     W = Variable(randn(out_channels, in_channels, kernel) * sqrt(2 / (in_channels * kernel)),
@@ -252,125 +253,104 @@ function Conv1D(in_channels, out_channels, kernel::Int, activation=identity;
     return x -> Conv1DOp(W, b, x, kernel, stride, padding, activation, nothing, nothing, nothing)
 
 end
-
 function forward(node::Conv1DOp)
-    x = node.input.output
-    W = node.W.output
-    bias = node.b === nothing ? nothing : node.b.output
+    @inbounds begin
+        x = node.input.output
+        W = node.W.output
+        b = node.b === nothing ? nothing : node.b.output
 
-    L, C, B = size(x)
-    K = node.kernel
-    S = node.stride
-    P = node.padding
+        L, C, B = size(x)
+        K = node.kernel
+        S = node.stride
+        P = node.padding
 
-    x_padded = zeros(L + 2P, C, B)
-    x_padded[P+1:end-P, :, :] .= x
+        L_p = L + 2P
+        L_out = div(L_p - K, S) + 1
 
-    L_p = size(x_padded, 1)
-    L_out = div(L_p - K, S) + 1
+        x_padded = zeros(L_p, C, B)
+        @views x_padded[P+1:end-P, :, :] .= x
 
-    X_col = Array{Float64}(undef, C * K, L_out * B)
-    for batch in 1:B
-        col = 1
-        for i in 1:S:(L_p - K + 1)
-            patch = reshape(x_padded[i:i+K-1, :, batch], C * K)
-            X_col[:, (batch-1)*L_out + col] = patch
-            col += 1
+        if node.X_col === nothing || size(node.X_col) != (C * K, L_out * B)
+            node.X_col = zeros(C * K, L_out * B)
         end
-    end
-    node.X_col = X_col  # save for backward
+        X_col = node.X_col
 
-    W_mat = reshape(W, size(W,1), :)
-    out_mat = W_mat * X_col
 
-    if bias !== nothing
-        for i in 1:B
-            out_mat[:, (i-1)*L_out+1:i*L_out] .+= bias
+        for bidx in 1:B
+            col = 1
+            for i in 1:S:(L_p - K + 1)
+                patch = @view x_padded[i:i+K-1, :, bidx]
+                X_col[:, (bidx-1)*L_out + col] .= reshape(patch, :)
+                col += 1
+            end
         end
-    end
+        node.X_col = X_col
 
-    out = reshape(out_mat, size(W,1), L_out, B)
-    out = permutedims(out, (2,1,3))
-    node.output = node.activation(out)
+        W_mat = reshape(W, size(W, 1), :)
+        out_mat = W_mat * X_col
+
+        if b !== nothing
+            for bidx in 1:B
+                @views out_mat[:, (bidx-1)*L_out+1:bidx*L_out] .+= b
+            end
+        end
+
+        out = reshape(out_mat, size(W,1), L_out, B)
+        node.output = node.activation(permutedims(out, (2,1,3)))
+    end
 end
 
 
 function backward(node::Conv1DOp)
-    δy = node.gradient             # (L_out, Out, B)
-    x = node.input.output          # (L, C, B)
-    W = node.W.output              # (Out, In, K)
-    B = size(x, 3)
-    C = size(x, 2)
-    L = size(x, 1)
-    O, _, K = size(W)
+    @inbounds begin
+        δy = node.gradient
+        x = node.input.output
+        W = node.W.output
 
-    S = node.stride
-    P = node.padding
-    act = node.activation
-    L_out = size(δy, 1)
+        L, C, B = size(x)
+        O, _, K = size(W)
+        S = node.stride
+        P = node.padding
+        L_out = size(δy, 1)
 
-    # === Backprop through activation ===
-    if act == relu
-        activated = node.output
-        δy = δy .* (activated .> 0)
-    elseif act == sigmoid
-        σ = node.output
-        δy = δy .* σ .* (1 .- σ)
-    elseif act != identity_fn
-        error("Unsupported activation $(act) in Conv1D backward")
-    end
+        # Activation gradient
+        if node.activation == relu
+            δy = δy .* (node.output .> 0)
+        elseif node.activation == sigmoid
+            σ = node.output
+            δy = δy .* σ .* (1 .- σ)
+        elseif node.activation != identity_fn
+            error("Unsupported activation function")
+        end
 
-    # === Reshape δy ===
-    δy_mat = permutedims(δy, (2, 1, 3))         # (Out, L_out, B)
-    δy_mat = reshape(δy_mat, O, L_out * B)      # (Out, L_out*B)
+        δy_mat = permutedims(δy, (2, 1, 3))  # (O, L_out, B)    
+        δy_mat = reshape(δy_mat, O, L_out * B)
 
-    # === Use saved X_col from forward, or reconstruct ===
-    if hasfield(typeof(node), :X_col)   && !isnothing(node.X_col)
-        X_col = node.X_col                      # (C*K, L_out*B)
-    else
-        # reconstruct with padding
-        L_p = L + 2P
-        x_padded = zeros(Float64, L_p, C, B)
-        x_padded[P+1:end-P, :, :] .= x
+        X_col = node.X_col
+        dW_mat = δy_mat * X_col'
+        node.W.gradient .= reshape(dW_mat, size(W))
 
-        X_col = Array{Float64}(undef, C * K, L_out * B)
-        for batch in 1:B
+        if node.b !== nothing
+            db = sum(δy_mat, dims=2)
+            node.b.gradient .= reshape(db, size(node.b.output))
+        end
+
+        W_mat = reshape(W, O, :)
+        dX_col = W_mat' * δy_mat  # (C*K, L_out * B)
+
+        dx_padded = zeros(L + 2P, C, B)
+        for bidx in 1:B
             col = 1
-            for i in 1:S:(L_p - K + 1)
-                patch = reshape(x_padded[i:i+K-1, :, batch], C * K)
-                X_col[:, (batch-1)*L_out + col] = patch
+            for i in 1:S:(L + 2P - K + 1)
+                patch = reshape(dX_col[:, (bidx-1)*L_out + col], K, C)
+                dx_padded[i:i+K-1, :, bidx] .+= patch
                 col += 1
             end
         end
+
+        dx = @view dx_padded[P+1:end-P, :, :]
+        node.input.gradient = isnothing(node.input.gradient) ? dx : node.input.gradient .+ dx
     end
-
-    # === Compute dW and db ===
-    dW_mat = δy_mat * X_col'
-    node.W.gradient .= reshape(dW_mat, size(W))
-
-    if node.b !== nothing
-        db = sum(δy_mat; dims=2)
-        node.b.gradient .= reshape(db, size(node.b.output))
-    end
-
-    # === Compute dX_col ===
-    W_mat = reshape(W, O, C * K)
-    dX_col = W_mat' * δy_mat                    # (C*K, L_out*B)
-
-    # === Construct dx_padded ===
-    dx_padded = zeros(Float64, L + 2P, C, B)
-    for batch in 1:B
-        col = 1
-        for i in 1:S:(L + 2P - K + 1)
-            patch = reshape(dX_col[:, (batch-1)*L_out + col], K, C)
-            dx_padded[i:i+K-1, :, batch] .+= patch
-            col += 1
-        end
-    end
-
-    # === Remove padding ===
-    dx = dx_padded[P+1:end-P, :, :]  # (L, C, B)
-    node.input.gradient = isnothing(node.input.gradient) ? dx : node.input.gradient .+ dx
 end
 
 
@@ -384,36 +364,53 @@ mutable struct MaxPool1DOp <: GraphNode
 end
 
 function forward(node::MaxPool1DOp)
-    x = node.x.output  # (L, C, B)
-    L, C, B = size(x)
-    k, s = node.kernel_size, node.stride
-    out_len = (L - k) ÷ s + 1
-    out = zeros(out_len, C, B)
-    idx = similar(out, Int)
+    @inbounds begin
+        x = node.x.output
+        L, C, B = size(x)
+        k, s = node.kernel_size, node.stride
+        out_len = div(L - k, s) + 1
 
-    @inbounds for b in 1:B, c in 1:C, i in 0:out_len-1
-        r = i*s + 1 : i*s + k
-        win = x[r, c, b]
-        max_val, max_idx = findmax(win)
-        out[i+1, c, b] = max_val
-        idx[i+1, c, b] = r.start + max_idx - 1
+        if node.output === nothing || size(node.output) != (out_len, C, B)
+            node.output = zeros(out_len, C, B)
+        end
+        if node.indices === nothing || size(node.indices) != (out_len, C, B)
+            node.indices = zeros(Int, out_len, C, B)
+        end
+        out = node.output
+        idx = node.indices
+
+
+        out = reshape(out, out_len, C, B)
+        idx = reshape(idx, out_len, C, B)
+
+        for b in 1:B, c in 1:C, i in 0:out_len-1
+            r = i*s + 1 : i*s + k
+            win = @view x[r, c, b]
+            max_val, max_idx = findmax(win)
+            out[i+1, c, b] = max_val
+            idx[i+1, c, b] = r.start + max_idx - 1
+        end
+
+        node.output = out
+        node.indices = idx
     end
-
-    node.output = out
-    node.indices = idx
 end
 
+
 function backward(node::MaxPool1DOp)
-    x = node.x
-    dx = zeros(size(x.output))  # (L, C, B)
-    dy, idx = node.gradient, node.indices
-    L_out, C, B = size(dy)
+    @inbounds begin
+        x = node.x
+        dy = node.gradient
+        idx = node.indices
+        L_out, C, B = size(dy)
 
-    @inbounds for b in 1:B, c in 1:C, i in 1:L_out
-        dx[idx[i, c, b], c, b] += dy[i, c, b]
+        dx = zeros(size(x.output))
+        for b in 1:B, c in 1:C, i in 1:L_out
+            dx[idx[i, c, b], c, b] += dy[i, c, b]
+        end
+
+        x.gradient = isnothing(x.gradient) ? dx : x.gradient .+ dx
     end
-
-    x.gradient = isnothing(x.gradient) ? dx : x.gradient .+ dx
 end
 
 
