@@ -13,12 +13,12 @@ struct Dense
 end
 
 function Dense(in::Int, out::Int, act = MyAD.identity_fn)
-    std = act == MyAD.relu ? sqrt(2 / in) : sqrt(1.0) 
-
-    W = MyAD.Variable(randn(out, in) * std, zeros(out, in))        
+    std = act == MyAD.relu ? sqrt(2 / in) : sqrt(1 / in)
+    W = MyAD.Variable(randn(out, in) * std, zeros(out, in))
     b = MyAD.Variable(zeros(out, 1), zeros(out, 1))
     return Dense(W, b, act)
 end
+
 
 function (layer::Dense)(x::MyAD.GraphNode)
     z = MyAD.MatMulOperator(layer.W, x)
@@ -147,10 +147,9 @@ struct Conv1D
 end
 
 function Conv1D(in_channels::Int, out_channels::Int, kernel_size::Int, act = MyAD.identity_fn)
-    std = act == MyAD.relu ? sqrt(2 / (in_channels * kernel_size)) : 1.0
-    W = randn(Float32, out_channels, in_channels, kernel_size) * std
+    std = act == MyAD.relu ? sqrt(2 / (in_channels * kernel_size)) : sqrt(1 / (in_channels * kernel_size))
+    W = randn(out_channels, in_channels, kernel_size) * std
     b = zeros(out_channels, 1)
-
     return Conv1D(
         MyAD.Variable(W, zeros(size(W))),
         MyAD.Variable(b, zeros(size(b))),
@@ -158,13 +157,14 @@ function Conv1D(in_channels::Int, out_channels::Int, kernel_size::Int, act = MyA
     )
 end
 
+
 function (layer::Conv1D)(x::MyAD.GraphNode)
     return MyAD.Conv1DOp(layer.W, layer.b, x,
                          size(layer.W.output, 3),  # kernel size
                          1,  # default stride
                          0,  # default padding
                          layer.activation,
-                         nothing, nothing, nothing)
+                         nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
 
 

@@ -65,7 +65,7 @@ BroadcastedOperator(f::Function, x::GraphNode) =
 relu(x) = max.(0, x)
 sigmoid(x) = 1.0 ./ (1.0 .+ exp.(-x))
 identity_fn(x) = x
-broadcast_add(a::AbstractMatrix, b::AbstractMatrix) = a .+ b
+broadcast_add(a::AbstractMatrix, b::AbstractMatrix) = a .+ b * ones(size(b, 2))
 
 # === Operator Overloading ===
 import Base: +, *, -, /, sin
@@ -249,8 +249,11 @@ mutable struct Conv1DOp{T} <: GraphNode
     output::Union{Nothing, AbstractArray{T}}
     gradient::Union{Nothing, AbstractArray{T}}
     X_col::Union{Nothing, AbstractArray{T}}
+    x_padded::Union{Nothing, AbstractArray{T}}
+    W_mat::Union{Nothing, AbstractArray{T}}
+    out_mat::Union{Nothing, AbstractArray{T}}
+    dx_padded::Union{Nothing, AbstractArray{T}}
 end
-
 
 
 function Conv1D(in_channels, out_channels, kernel::Int, activation=identity;
@@ -258,11 +261,13 @@ function Conv1D(in_channels, out_channels, kernel::Int, activation=identity;
     W = Variable(randn(out_channels, in_channels, kernel) * sqrt(2 / (in_channels * kernel)),
                  zeros(out_channels, in_channels, kernel))
     b = Variable(zeros(out_channels, 1), zeros(out_channels, 1))
-    return x -> Conv1DOp(W, b, x, kernel, stride, padding, activation, nothing, nothing, nothing)
-
+    return x -> Conv1DOp(W, b, x, kernel, stride, padding, activation,
+                         nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
 
+
 using Base.Threads: @threads
+using LinearAlgebra: mul!
 
 function forward(node::Conv1DOp)
     @inbounds begin
@@ -277,15 +282,34 @@ function forward(node::Conv1DOp)
 
         L_p = L + 2P
         L_out = div(L_p - K, S) + 1
+        O = size(W, 1)
 
-        x_padded = zeros(L_p, C, B)
-        @views x_padded[P+1:end-P, :, :] .= x
+        # === Allocate x_padded only if needed ===
+        if node.x_padded === nothing || size(node.x_padded) != (L_p, C, B)
+            node.x_padded = zeros(eltype(x), L_p, C, B)
+        end
+        @views node.x_padded[P+1:end-P, :, :] .= x
+        x_padded = node.x_padded
 
+        # === Allocate X_col if shape mismatches ===
         if node.X_col === nothing || size(node.X_col) != (C * K, L_out * B)
-            node.X_col = zeros(C * K, L_out * B)
+            node.X_col = zeros(eltype(x), C * K, L_out * B)
         end
         X_col = node.X_col
 
+        # === Cache reshaped W ===
+        if node.W_mat === nothing || size(node.W_mat) != (O, C*K)
+            node.W_mat = reshape(W, O, :)
+        end
+        W_mat = node.W_mat
+
+        # === Allocate output mat ===
+        if node.out_mat === nothing || size(node.out_mat) != (O, L_out * B)
+            node.out_mat = zeros(eltype(x), O, L_out * B)
+        end
+        out_mat = node.out_mat
+
+        # === Fill X_col (im2col trick) ===
         @threads for bidx in 1:B
             col = 1
             for i in 1:S:(L_p - K + 1)
@@ -295,17 +319,19 @@ function forward(node::Conv1DOp)
             end
         end
 
-        W_mat = reshape(W, size(W, 1), :)
-        out_mat = W_mat * X_col
+        # === Matrix multiplication ===
+        mul!(out_mat, W_mat, X_col)  # BLAS-accelerated
 
+        # === Bias broadcast and add ===
         if b !== nothing
             @threads for bidx in 1:B
                 @views out_mat[:, (bidx-1)*L_out+1:bidx*L_out] .+= b
             end
         end
 
-        out = reshape(out_mat, size(W,1), L_out, B)
-        node.output = node.activation(permutedims(out, (2,1,3)))
+        # === Final reshape ===
+        out = reshape(out_mat, O, L_out, B)
+        node.output = node.activation(permutedims(out, (2, 1, 3)))
     end
 end
 
@@ -323,46 +349,62 @@ function backward(node::Conv1DOp)
         P = node.padding
         L_out = size(δy, 1)
 
-        # Activation gradient
+        # === Activation gradient ===
         if node.activation == relu
-            δy = δy .* (node.output .> 0)
+            @. δy = δy * (node.output > 0)
         elseif node.activation == sigmoid
             σ = node.output
-            δy = δy .* σ .* (1 .- σ)
+            @. δy = δy * σ * (1 - σ)
         elseif node.activation != identity_fn
             error("Unsupported activation function")
         end
 
-        δy_mat = permutedims(δy, (2, 1, 3))  # (O, L_out, B)
-        δy_mat = reshape(δy_mat, O, L_out * B)
+        # === Reuse or reshape buffers ===
+        δy_mat = reshape(permutedims(δy, (2, 1, 3)), O, L_out * B)
 
-        X_col = node.X_col
+        X_col = node.X_col  # already cached
         dW_mat = δy_mat * X_col'
         node.W.gradient .= reshape(dW_mat, size(W))
 
+        # === Bias gradient ===
         if node.b !== nothing
             db = sum(δy_mat, dims=2)
             node.b.gradient .= reshape(db, size(node.b.output))
         end
 
-        W_mat = reshape(W, O, :)
-        dX_col = W_mat' * δy_mat  # (C*K, L_out * B)
+        # === Compute dX_col using cached W_mat ===
+        W_mat = node.W_mat !== nothing ? node.W_mat : reshape(W, O, :)
+        dX_col = W_mat' * δy_mat
 
-        dx_padded = zeros(L + 2P, C, B)
+        # === Reuse dx_padded buffer ===
+        if node.dx_padded === nothing || size(node.dx_padded) != (L + 2P, C, B)
+            node.dx_padded = zeros(eltype(x), L + 2P, C, B)
+        else
+            fill!(node.dx_padded, 0)
+        end
+        dx_padded = node.dx_padded
 
+        # === Accumulate dX patches ===
         @threads for bidx in 1:B
             col = 1
             for i in 1:S:(L + 2P - K + 1)
-                patch = reshape(dX_col[:, (bidx-1)*L_out + col], K, C)
-                dx_padded[i:i+K-1, :, bidx] .+= patch
+                col_slice = @view dX_col[:, (bidx-1)*L_out + col]
+                patch = reshape(col_slice, K, C)
+                @views dx_padded[i:i+K-1, :, bidx] .+= patch
                 col += 1
             end
         end
 
+        # === Unpad dx and accumulate ===
         dx = @view dx_padded[P+1:end-P, :, :]
-        node.input.gradient = isnothing(node.input.gradient) ? dx : node.input.gradient .+ dx
+        if isnothing(node.input.gradient)
+            node.input.gradient = copy(dx)
+        else
+            node.input.gradient .+= dx
+        end
     end
 end
+
 
 
 
@@ -373,7 +415,9 @@ mutable struct MaxPool1DOp{T} <: GraphNode
     output::Union{Nothing, T}
     gradient::Union{Nothing, T}
     indices::Union{Nothing, Array{Int}}
+    dx::Union{Nothing, T}
 end
+
 
 # ← типовой (универсальный)
 function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int,
@@ -384,7 +428,7 @@ end
 
 # ← fallback с T = Any (для пустых данных)
 function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int)
-    return MaxPool1DOp{Any}(x, kernel_size, stride, nothing, nothing, nothing)
+    return MaxPool1DOp{Any}(x, kernel_size, stride, nothing, nothing, nothing, nothing)
 end
 
 function forward(node::MaxPool1DOp)
@@ -394,8 +438,9 @@ function forward(node::MaxPool1DOp)
         k, s = node.kernel_size, node.stride
         out_len = div(L - k, s) + 1
 
+        # === Reuse or allocate buffers ===
         if node.output === nothing || size(node.output) != (out_len, C, B)
-            node.output = zeros(out_len, C, B)
+            node.output = zeros(eltype(x), out_len, C, B)
         end
         if node.indices === nothing || size(node.indices) != (out_len, C, B)
             node.indices = zeros(Int, out_len, C, B)
@@ -419,14 +464,22 @@ function forward(node::MaxPool1DOp)
 end
 
 
+
 function backward(node::MaxPool1DOp)
     @inbounds begin
         x = node.x
         dy = node.gradient
         idx = node.indices
         L_out, C, B = size(dy)
+        L, _, _ = size(x.output)
 
-        dx = zeros(size(x.output))
+        # === Reuse or allocate dx ===
+        if node.dx === nothing || size(node.dx) != size(x.output)
+            node.dx = zeros(eltype(x.output), size(x.output))
+        else
+            fill!(node.dx, 0)
+        end
+        dx = node.dx
 
         @threads for b in 1:B
             for c in 1:C
@@ -436,9 +489,14 @@ function backward(node::MaxPool1DOp)
             end
         end
 
-        x.gradient = isnothing(x.gradient) ? dx : x.gradient .+ dx
+        if isnothing(x.gradient)
+            x.gradient = copy(dx)
+        else
+            x.gradient .+= dx
+        end
     end
 end
+
 
 
 
