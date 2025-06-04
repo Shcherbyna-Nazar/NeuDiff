@@ -5,174 +5,160 @@ using ..MyAD
 export Dense, Chain, parameters, update!, Dropout, zero_gradients!, AdamState,
        update_adam!, Embedding, Conv1D, MaxPool1D
 
-# Optimized Dense Layer
-struct Dense
-    W::MyAD.Variable
-    b::MyAD.Variable
-    activation::Function
+# === Optimized Dense Layer ===
+struct Dense{T, F}
+    W::MyAD.Variable{T}
+    b::MyAD.Variable{T}
+    activation::F
 end
 
 function Dense(in::Int, out::Int, act = MyAD.identity_fn)
-    std = act == MyAD.relu ? sqrt(2 / in) : sqrt(1 / in)
-    W = MyAD.Variable(randn(out, in) * std, zeros(out, in))
-    b = MyAD.Variable(zeros(out, 1), zeros(out, 1))
+    T = Float32
+    std = act == MyAD.relu ? sqrt(T(2) / in) : sqrt(T(1) / in)
+    W = MyAD.Variable(randn(T, out, in) * std, zeros(T, out, in))
+    b = MyAD.Variable(zeros(T, out, 1), zeros(T, out, 1))
     return Dense(W, b, act)
 end
 
-
 function (layer::Dense)(x::MyAD.GraphNode)
     z = MyAD.MatMulOperator(layer.W, x)
-    z = MyAD.ScalarOperator(broadcast_add, z, layer.b)
+    z = MyAD.ScalarOperator(MyAD.broadcast_add, z, layer.b)
     return MyAD.BroadcastedOperator(layer.activation, z)
 end
 
-# Dropout Layer (No change)
-struct Dropout
-    rate::Float64
+# === Dropout Layer ===
+struct Dropout{T}
+    rate::T
 end
 
 function (d::Dropout)(x::MyAD.GraphNode)
-    return x  # This can be optimized based on how dropout is used
+    return x  # Placeholder; actual dropout implementation can go here
 end
 
-# Chain Model (No change)
-struct Chain
-    layers::Vector{Any}
+# === Chain Model ===
+struct Chain{L}
+    layers::L
 end
 
-Chain(args...) = Chain(collect(args))
+Chain(args...) = Chain(args)
 
 function (chain::Chain)(x)
     for layer in chain.layers
         x = layer(x)
-        # Show the type and output shape of the layer
     end
     return x
 end
 
-# Parameters Function
+# === Parameters Function ===
 function parameters(model::Chain)
     ps = MyAD.GraphNode[]
     for layer in model.layers
-        if layer isa Dense
+        if layer isa Dense || layer isa Conv1D
             push!(ps, layer.W, layer.b)
-        end
-        if layer isa Conv1D
-            push!(ps, layer.W, layer.b)
-        end
-        if layer isa Embedding
+        elseif layer isa Embedding
             push!(ps, layer.weight)
         end
     end
     return ps
 end
 
-# Update Function (In-place memory operation)
-function update!(params::Vector{MyAD.GraphNode}, η::Real)
+# === Update Function ===
+function update!(params::Vector{<:MyAD.GraphNode}, η::Real)
     for p in params
-        p.output .-= η .* p.gradient
+        @. p.output -= η * p.gradient
     end
 end
 
-# Zero Gradients Function
+# === Zero Gradients Function ===
 function zero_gradients!(model::Chain)
     for p in parameters(model)
-        p.gradient .= 0.0
+        fill!(p.gradient, 0)
     end
 end
 
-# Adam Optimizer State (Optimized)
-mutable struct AdamState
-    m::Vector{AbstractArray{Float64}}  
-    v::Vector{AbstractArray{Float64}} 
-    β1::Float64
-    β2::Float64
-    ϵ::Float64
+# === Adam Optimizer State ===
+mutable struct AdamState{T}
+    m::Vector{Array{T}}
+    v::Vector{Array{T}}
+    β1::T
+    β2::T
+    ϵ::T
     t::Int
 end
 
 function AdamState(params; β1=0.9, β2=0.999, ϵ=1e-8)
-    m = [similar(p.output) .= 0.0 for p in params]
-    v = [similar(p.output) .= 0.0 for p in params]
-    return AdamState(m, v, β1, β2, ϵ, 0)
+    T = eltype(params[1].output)
+    m = [zeros(T, size(p.output)) for p in params]
+    v = [zeros(T, size(p.output)) for p in params]
+    return AdamState{T}(m, v, β1, β2, ϵ, 0)
 end
 
-# Adam Optimizer Update (Optimized)
-function update_adam!(state::AdamState, params::Vector{MyAD.GraphNode}, η::Real)
+function update_adam!(state::AdamState, params::Vector{<:MyAD.GraphNode}, η::Real)
     state.t += 1
     for (i, p) in enumerate(params)
         g = p.gradient
-        state.m[i] .= state.β1 .* state.m[i] .+ (1 .- state.β1) .* g
-        state.v[i] .= state.β2 .* state.v[i] .+ (1 .- state.β2) .* (g .^ 2)
+        m, v = state.m[i], state.v[i]
 
-        m_hat = state.m[i] ./ (1 .- state.β1 ^ state.t)
-        v_hat = state.v[i] ./ (1 .- state.β2 ^ state.t)
+        @. m = state.β1 * m + (1 - state.β1) * g
+        @. v = state.β2 * v + (1 - state.β2) * g^2
 
-        p.output .-= η .* m_hat ./ (sqrt.(v_hat) .+ state.ϵ)
+        m_hat = m ./ (1 - state.β1 ^ state.t)
+        v_hat = v ./ (1 - state.β2 ^ state.t)
+
+        @. p.output -= η * m_hat / (sqrt(v_hat) + state.ϵ)
     end
 end
 
-# Optimized Embedding Layer (using in-place operations)
-struct Embedding
-    weight::MyAD.Variable  # (embedding_dim, vocab_size)
+# === Embedding Layer ===
+struct Embedding{T}
+    weight::MyAD.Variable{T}  # (embedding_dim, vocab_size)
 end
 
 function Embedding(vocab_size::Int, embedding_dim::Int; pretrained_weights=nothing)
-    if pretrained_weights === nothing
-        weights = randn(Float32, embedding_dim, vocab_size) * sqrt(1 / vocab_size)
-    else
-        weights = pretrained_weights
-    end
-    zeros_like = zeros(eltype(weights), size(weights))
-    w_var = MyAD.Variable(weights, zeros_like)
+    T = Float32
+    weights = pretrained_weights === nothing ? randn(T, embedding_dim, vocab_size) * sqrt(T(1) / vocab_size) : pretrained_weights
+    w_var = MyAD.Variable(weights, zeros(T, size(weights)))
     return Embedding(w_var)
 end
 
-
 function (layer::Embedding)(x::Matrix{Int})
-    word_idxs = vec(x)  # shape: seq_len * batch_size
+    word_idxs = vec(x)
     seq_len, batch_size = size(x)
-    shape = (size(layer.weight.output, 1), seq_len, batch_size)  # (embedding_dim, L, B)
-    
+    shape = (size(layer.weight.output, 1), seq_len, batch_size)
     return MyAD.EmbeddingOp(layer.weight, word_idxs, shape)
 end
 
-
-# Optimized Conv1D Layer (using efficient convolutions)
-export Conv1D
-struct Conv1D
-    W::MyAD.Variable  # (out_channels, in_channels, kernel_size)
-    b::MyAD.Variable  # (out_channels, 1)
-    activation::Function
+# === Conv1D Layer ===
+struct Conv1D{T, F}
+    W::MyAD.Variable{T}  # (out_channels, in_channels, kernel_size)
+    b::MyAD.Variable{T}  # (out_channels, 1)
+    activation::F
 end
 
 function Conv1D(in_channels::Int, out_channels::Int, kernel_size::Int, act = MyAD.identity_fn)
-    std = act == MyAD.relu ? sqrt(2 / (in_channels * kernel_size)) : sqrt(1 / (in_channels * kernel_size))
-    W = randn(out_channels, in_channels, kernel_size) * std
-    b = zeros(out_channels, 1)
+    T = Float32
+    std = act == MyAD.relu ? sqrt(T(2) / (in_channels * kernel_size)) : sqrt(T(1) / (in_channels * kernel_size))
+    W = randn(T, out_channels, in_channels, kernel_size) * std
+    b = zeros(T, out_channels, 1)
     return Conv1D(
-        MyAD.Variable(W, zeros(size(W))),
-        MyAD.Variable(b, zeros(size(b))),
+        MyAD.Variable(W, zeros(T, size(W))),
+        MyAD.Variable(b, zeros(T, size(b))),
         act
     )
 end
 
-
 function (layer::Conv1D)(x::MyAD.GraphNode)
     return MyAD.Conv1DOp(layer.W, layer.b, x,
                          size(layer.W.output, 3),  # kernel size
-                         1,  # default stride
-                         0,  # default padding
+                         1,  # stride
+                         0,  # padding
                          layer.activation,
                          nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
 
-
-# MaxPool1D Layer
-export MaxPool1D
+# === MaxPool1D Layer ===
 function MaxPool1D(kernel_size::Int, stride::Int)
     return x -> MyAD.MaxPool1DOp(x, kernel_size, stride)
 end
-
 
 end # module
