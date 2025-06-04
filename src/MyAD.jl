@@ -34,31 +34,29 @@ mutable struct ScalarOperator{F, T} <: GraphNode
 end
 
 ScalarOperator(f::Function, args::GraphNode...) =
-    ScalarOperator{typeof(f), Any}(f, collect(args), nothing, nothing)
+    ScalarOperator{typeof(f), eltype(args[1].output)}(f, collect(args), nothing, nothing)
 
-
-# === Matrix Multiplication Operator ===
+# === MatMul Operator ===
 mutable struct MatMulOperator{T} <: GraphNode
     A::GraphNode
     B::GraphNode
-    output::Union{Nothing, T}
-    gradient::Union{Nothing, T}
+    output::Union{Nothing, AbstractMatrix{T}}
+    gradient::Union{Nothing, AbstractMatrix{T}}
 end
 
 MatMulOperator(A::GraphNode, B::GraphNode) =
-    MatMulOperator{Any}(A, B, nothing, nothing)
-
+    MatMulOperator{eltype(A.output)}(A, B, nothing, nothing)
 
 # === Broadcasted Operator ===
 mutable struct BroadcastedOperator{F, T} <: GraphNode
     f::F
     input::GraphNode
-    output::Union{Nothing, T}
-    gradient::Union{Nothing, T}
+    output::Union{Nothing, AbstractArray{T}}
+    gradient::Union{Nothing, AbstractArray{T}}
 end
 
 BroadcastedOperator(f::Function, x::GraphNode) =
-    BroadcastedOperator{typeof(f), Any}(f, x, nothing, nothing)
+    BroadcastedOperator{typeof(f), eltype(x.output)}(f, x, nothing, nothing)
 
 
 # === Activation Functions ===
@@ -136,13 +134,19 @@ function forward(node::GraphNode)
     error("No forward method defined for type $(typeof(node))")
 end
 
+
+# Accumulate gradients 
+function accumulate_grad!(x::GraphNode, dx)
+    if isnothing(x.gradient)
+        x.gradient = dx
+    else
+        x.gradient .+= dx
+    end
+end
+
+
 # === Backward ===
 function backward!(nodes::Vector{GraphNode}, seed=1.0)
-    for node in nodes
-        if !isnothing(node.output)
-            node.gradient = zeros(size(node.output))
-        end
-    end
     last(nodes).gradient = seed
     for node in reverse(nodes)
         backward(node)
@@ -153,26 +157,26 @@ function backward(node::ScalarOperator)
     f, inputs, out_grad = node.f, node.inputs, node.gradient
     if f == +
         for input in inputs
-            input.gradient .+= out_grad
+            accumulate_grad!(input, out_grad)
         end
     elseif f == *
         a, b = inputs
-        a.gradient .+= out_grad .* b.output
-        b.gradient .+= out_grad .* a.output
+        accumulate_grad!(a, out_grad .* b.output)
+        accumulate_grad!(b, out_grad .* a.output)
     elseif f == -
         a, b = inputs
-        a.gradient .+= out_grad
-        b.gradient .-= out_grad
+        accumulate_grad!(a, out_grad)
+        accumulate_grad!(b, -out_grad)
     elseif f == /
         a, b = inputs
-        a.gradient .+= out_grad ./ b.output
-        b.gradient .-= out_grad .* a.output ./ (b.output .^ 2)
+        accumulate_grad!(a, out_grad ./ b.output)
+        accumulate_grad!(b, -out_grad .* a.output ./ (b.output .^ 2))
     elseif f == sin
         x = inputs[1]
-        x.gradient .+= out_grad .* cos.(x.output)
+        accumulate_grad!(x, out_grad .* cos.(x.output))
     elseif f == broadcast_add
         a, b = inputs
-        a.gradient .+= out_grad
+        accumulate_grad!(a, out_grad)
         grad_b = sum(out_grad, dims=2)
         if !isnothing(b.gradient)
             b.gradient .+= convert.(eltype(b.gradient), grad_b)
@@ -182,7 +186,7 @@ function backward(node::ScalarOperator)
 
     elseif f == flatten_last_two_dims_op
         input = inputs[1]
-        input.gradient .+= reshape(out_grad, size(input.output))
+        accumulate_grad!(input, reshape(out_grad, size(input.output)))
     else
         error("Unsupported scalar function $f")
     end
@@ -190,8 +194,8 @@ end
 
 function backward(node::MatMulOperator)
     A, B, out_grad = node.A, node.B, node.gradient
-    A.gradient .+= out_grad * B.output'
-    B.gradient .+= A.output' * out_grad
+    accumulate_grad!(A, out_grad * B.output')
+    accumulate_grad!(B, A.output' * out_grad)
 end
 
 function backward(node::BroadcastedOperator)
@@ -223,7 +227,11 @@ mutable struct FlattenOp{T} <: GraphNode
     gradient::Union{Nothing, T}
 end
 
-flatten_last_two_dims(x::GraphNode) = FlattenOp{Any}(x, (), nothing, nothing)
+function flatten_last_two_dims(x::GraphNode)
+    T = eltype(x.output)
+    return FlattenOp{T}(x, (), nothing, nothing)
+end
+
 
 
 function forward(node::FlattenOp)
@@ -426,9 +434,9 @@ function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int,
     return MaxPool1DOp{T}(x, kernel_size, stride, output, gradient, indices)
 end
 
-# ← fallback с T = Any (для пустых данных)
 function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int)
-    return MaxPool1DOp{Any}(x, kernel_size, stride, nothing, nothing, nothing, nothing)
+    T = eltype(x.output)
+    return MaxPool1DOp{T}(x, kernel_size, stride, nothing, nothing, nothing, nothing)
 end
 
 function forward(node::MaxPool1DOp)
@@ -509,7 +517,7 @@ mutable struct PermuteDimsOp{T} <: GraphNode
 end
 
 PermuteDimsOp(x::GraphNode, dims::NTuple{3, Int}) =
-    PermuteDimsOp{Any}(x, dims, nothing, nothing)
+    PermuteDimsOp{eltype(x.output)}(x, dims, nothing, nothing)
 
 
 function forward(node::PermuteDimsOp)
