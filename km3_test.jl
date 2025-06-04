@@ -19,13 +19,15 @@ embedding_dim = size(embeddings, 1)
 vocab_size = length(vocab)
 
 # === Model ===
-embedding = Embedding(vocab_size, embedding_dim; pretrained_weights=embeddings)
-permute = x -> PermuteDimsOp(x, (2, 1, 3))  # (L, C, B) -> (C, L, B)
-conv = Conv1D(embedding_dim, 8, 3, relu)
-pool = MaxPool1D(8, 8)
-flatten = flatten_last_two_dims
-dense = Dense(128, 1, sigmoid)
-model = Chain(embedding, permute, conv, pool, flatten, dense)
+model = Chain(
+    Embedding(vocab_size, embedding_dim),
+    x -> PermuteDimsOp(x, (2, 1, 3)),  # (L, C, B) -> (C, L, B)
+    Conv1D(embedding_dim, 8, 3, relu),
+    MaxPool1D(8, 8),
+    flatten_last_two_dims,
+    Dense(128, 1, sigmoid)
+)
+model.layers[1].weight.output = embeddings  # Set pretrained weights
 
 # === Loss and accuracy ===
 function bce(ŷ, y)

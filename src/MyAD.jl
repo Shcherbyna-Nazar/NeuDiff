@@ -2,8 +2,8 @@
 module MyAD
 
 export GraphNode, Constant, Variable, ScalarOperator, MatMulOperator, BroadcastedOperator,
-       forward!, backward!, topological_sort, relu, sigmoid, identity_fn, broadcast_add,
-       Conv1DOp, MaxPool1DOp, PermuteDimsOp, flatten_last_two_dims, flatten_last_two_dims_op
+    forward!, backward!, topological_sort, relu, sigmoid, identity_fn, broadcast_add,
+    Conv1DOp, MaxPool1DOp, PermuteDimsOp, flatten_last_two_dims, flatten_last_two_dims_op
 
 # === Abstract Node Type ===
 abstract type GraphNode end
@@ -11,7 +11,7 @@ abstract type GraphNode end
 # === Basic Nodes ===
 mutable struct Constant{T} <: GraphNode
     output::T
-    gradient::Union{Nothing, T}
+    gradient::Union{Nothing,T}
 end
 
 Constant(x::T) where T = Constant{T}(x, nothing)
@@ -23,41 +23,124 @@ end
 
 Variable(x::AbstractArray{T}, g::AbstractArray{T}) where {T} = Variable{T}(x, g)
 
-
-
 # === Scalar Operator ===
-mutable struct ScalarOperator{F, T} <: GraphNode
+mutable struct ScalarOperator{F,T} <: GraphNode
     f::F
     inputs::Vector{GraphNode}
-    output::Union{Nothing, T}
-    gradient::Union{Nothing, T}
+    output::Union{Nothing,T}
+    gradient::Union{Nothing,T}
 end
 
 ScalarOperator(f::Function, args::GraphNode...) =
-    ScalarOperator{typeof(f), eltype(args[1].output)}(f, collect(args), nothing, nothing)
+    ScalarOperator{typeof(f),eltype(args[1].output)}(f, collect(args), nothing, nothing)
 
 # === MatMul Operator ===
 mutable struct MatMulOperator{T} <: GraphNode
     A::GraphNode
     B::GraphNode
-    output::Union{Nothing, AbstractMatrix{T}}
-    gradient::Union{Nothing, AbstractMatrix{T}}
+    output::Union{Nothing,AbstractMatrix{T}}
+    gradient::Union{Nothing,AbstractMatrix{T}}
 end
 
 MatMulOperator(A::GraphNode, B::GraphNode) =
     MatMulOperator{eltype(A.output)}(A, B, nothing, nothing)
 
 # === Broadcasted Operator ===
-mutable struct BroadcastedOperator{F, T} <: GraphNode
+mutable struct BroadcastedOperator{F,T} <: GraphNode
     f::F
     input::GraphNode
-    output::Union{Nothing, AbstractArray{T}}
-    gradient::Union{Nothing, AbstractArray{T}}
+    output::Union{Nothing,AbstractArray{T}}
+    gradient::Union{Nothing,AbstractArray{T}}
 end
 
 BroadcastedOperator(f::Function, x::GraphNode) =
-    BroadcastedOperator{typeof(f), eltype(x.output)}(f, x, nothing, nothing)
+    BroadcastedOperator{typeof(f),eltype(x.output)}(f, x, nothing, nothing)
 
+
+mutable struct FlattenOp{T} <: GraphNode
+    x::GraphNode
+    orig_shape::Tuple
+    output::Union{Nothing,T}
+    gradient::Union{Nothing,T}
+end
+
+function flatten_last_two_dims(x::GraphNode)
+    T = eltype(x.output)
+    return FlattenOp{T}(x, (), nothing, nothing)
+end
+
+mutable struct Conv1DOp{T} <: GraphNode
+    W::Variable{T}
+    b::Union{Variable{T},Nothing}
+    input::GraphNode
+    kernel::Int
+    stride::Int
+    padding::Int
+    activation::Function
+    output::Union{Nothing,AbstractArray{T}}
+    gradient::Union{Nothing,AbstractArray{T}}
+    X_col::Union{Nothing,AbstractArray{T}}
+    x_padded::Union{Nothing,AbstractArray{T}}
+    W_mat::Union{Nothing,AbstractArray{T}}
+    out_mat::Union{Nothing,AbstractArray{T}}
+    dx_padded::Union{Nothing,AbstractArray{T}}
+end
+
+
+function Conv1D(in_channels, out_channels, kernel::Int, activation=identity;
+    stride=1, padding=0)
+    W = Variable(randn(out_channels, in_channels, kernel) * sqrt(2 / (in_channels * kernel)),
+        zeros(out_channels, in_channels, kernel))
+    b = Variable(zeros(out_channels, 1), zeros(out_channels, 1))
+    return x -> Conv1DOp(W, b, x, kernel, stride, padding, activation,
+        nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+end
+
+
+mutable struct MaxPool1DOp{T} <: GraphNode
+    x::GraphNode
+    kernel_size::Int
+    stride::Int
+    output::Union{Nothing,T}
+    gradient::Union{Nothing,T}
+    indices::Union{Nothing,Array{Int}}
+    dx::Union{Nothing,T}
+end
+
+
+# ← типовой (универсальный)
+function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int,
+    output::Union{Nothing,T}, gradient::Union{Nothing,T},
+    indices::Union{Nothing,Array{Int}}) where {T}
+    return MaxPool1DOp{T}(x, kernel_size, stride, output, gradient, indices)
+end
+
+function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int)
+    T = eltype(x.output)
+    return MaxPool1DOp{T}(x, kernel_size, stride, nothing, nothing, nothing, nothing)
+end
+
+mutable struct PermuteDimsOp{T} <: GraphNode
+    x::GraphNode
+    dims::NTuple{3,Int}
+    output::Union{Nothing,T}
+    gradient::Union{Nothing,T}
+end
+
+PermuteDimsOp(x::GraphNode, dims::NTuple{3,Int}) =
+    PermuteDimsOp{eltype(x.output)}(x, dims, nothing, nothing)
+
+mutable struct EmbeddingOp{T} <: GraphNode
+    weight::Variable{T}
+    indices::Vector{Int}
+    shape::Tuple
+    output::Union{Nothing,AbstractArray{T}}
+    gradient::Union{Nothing,AbstractArray{T}}
+end
+
+function EmbeddingOp(weight::Variable{T}, indices::Vector{Int}, shape::Tuple) where {T}
+    return EmbeddingOp{T}(weight, indices, shape, nothing, nothing)
+end
 
 # === Activation Functions ===
 relu(x) = max.(0, x)
@@ -73,41 +156,67 @@ import Base: +, *, -, /, sin
 (/)(a::GraphNode, b::GraphNode) = ScalarOperator(/, a, b)
 sin(x::GraphNode) = ScalarOperator(sin, x)
 
-# === Topological Sort ===
+# --- Default fallback ---
+function visit_children(::GraphNode, ::Set{GraphNode}, ::Vector{GraphNode})
+    return nothing
+end
+
+# --- Specialized cases ---
+function visit_children(node::ScalarOperator{F,T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {F,T}
+    for x in node.inputs
+        visit(x, visited, order)
+    end
+end
+
+function visit_children(node::MatMulOperator{T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {T}
+    visit(node.A, visited, order)
+    visit(node.B, visited, order)
+end
+
+function visit_children(node::BroadcastedOperator{F,T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {F,T}
+    visit(node.input, visited, order)
+end
+
+function visit_children(node::Conv1DOp{T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {T}
+    visit(node.W, visited, order)
+    if node.b !== nothing
+        visit(node.b, visited, order)
+    end
+    visit(node.input, visited, order)
+end
+
+function visit_children(node::MaxPool1DOp{T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {T}
+    visit(node.x, visited, order)
+end
+
+function visit_children(node::PermuteDimsOp{T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {T}
+    visit(node.x, visited, order)
+end
+
+function visit_children(node::FlattenOp{T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {T}
+    visit(node.x, visited, order)
+end
+
+function visit_children(node::EmbeddingOp{T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {T}
+    visit(node.weight, visited, order)
+end
+
+# --- Generic recursive visit ---
 function visit(node::GraphNode, visited::Set{GraphNode}, order::Vector{GraphNode})
     if node ∉ visited
         push!(visited, node)
-        if node isa ScalarOperator
-            foreach(x -> visit(x, visited, order), node.inputs)
-        elseif node isa MatMulOperator
-            visit(node.A, visited, order)
-            visit(node.B, visited, order)
-        elseif node isa BroadcastedOperator
-            visit(node.input, visited, order)
-        elseif node isa Conv1DOp
-            visit(node.W, visited, order)
-            if node.b !== nothing
-                visit(node.b, visited, order)
-            end
-            visit(node.input, visited, order)
-        elseif node isa MaxPool1DOp
-            visit(node.x, visited, order)
-        elseif node isa PermuteDimsOp
-            visit(node.x, visited, order)
-        elseif node isa FlattenOp
-            visit(node.x, visited, order)
-
-        end
+        visit_children(node, visited, order)
         push!(order, node)
     end
 end
 
-function topological_sort(root::GraphNode)::Vector{GraphNode}
+function topological_sort(root::GraphNode)
     visited = Set{GraphNode}()
     order = Vector{GraphNode}()
     visit(root, visited, order)
     return order
 end
+
 
 # === Forward ===
 function forward!(nodes::Vector{GraphNode})
@@ -220,18 +329,6 @@ function backward(node::GraphNode)
 end
 
 # === Flatten
-mutable struct FlattenOp{T} <: GraphNode
-    x::GraphNode
-    orig_shape::Tuple
-    output::Union{Nothing, T}
-    gradient::Union{Nothing, T}
-end
-
-function flatten_last_two_dims(x::GraphNode)
-    T = eltype(x.output)
-    return FlattenOp{T}(x, (), nothing, nothing)
-end
-
 
 
 function forward(node::FlattenOp)
@@ -244,34 +341,6 @@ function backward(node::FlattenOp)
     node.x.gradient = isnothing(node.x.gradient) ? grad : node.x.gradient .+ grad
 end
 
-
-
-mutable struct Conv1DOp{T} <: GraphNode
-    W::Variable{T}
-    b::Union{Variable{T}, Nothing}
-    input::GraphNode
-    kernel::Int
-    stride::Int
-    padding::Int
-    activation::Function
-    output::Union{Nothing, AbstractArray{T}}
-    gradient::Union{Nothing, AbstractArray{T}}
-    X_col::Union{Nothing, AbstractArray{T}}
-    x_padded::Union{Nothing, AbstractArray{T}}
-    W_mat::Union{Nothing, AbstractArray{T}}
-    out_mat::Union{Nothing, AbstractArray{T}}
-    dx_padded::Union{Nothing, AbstractArray{T}}
-end
-
-
-function Conv1D(in_channels, out_channels, kernel::Int, activation=identity;
-                stride=1, padding=0)
-    W = Variable(randn(out_channels, in_channels, kernel) * sqrt(2 / (in_channels * kernel)),
-                 zeros(out_channels, in_channels, kernel))
-    b = Variable(zeros(out_channels, 1), zeros(out_channels, 1))
-    return x -> Conv1DOp(W, b, x, kernel, stride, padding, activation,
-                         nothing, nothing, nothing, nothing, nothing, nothing, nothing)
-end
 
 
 using Base.Threads: @threads
@@ -306,7 +375,7 @@ function forward(node::Conv1DOp)
         X_col = node.X_col
 
         # === Cache reshaped W ===
-        if node.W_mat === nothing || size(node.W_mat) != (O, C*K)
+        if node.W_mat === nothing || size(node.W_mat) != (O, C * K)
             node.W_mat = reshape(W, O, :)
         end
         W_mat = node.W_mat
@@ -320,9 +389,9 @@ function forward(node::Conv1DOp)
         # === Fill X_col (im2col trick) ===
         @threads for bidx in 1:B
             col = 1
-            for i in 1:S:(L_p - K + 1)
+            for i in 1:S:(L_p-K+1)
                 patch = @view x_padded[i:i+K-1, :, bidx]
-                X_col[:, (bidx-1)*L_out + col] .= reshape(patch, :)
+                X_col[:, (bidx-1)*L_out+col] .= reshape(patch, :)
                 col += 1
             end
         end
@@ -395,8 +464,8 @@ function backward(node::Conv1DOp)
         # === Accumulate dX patches ===
         @threads for bidx in 1:B
             col = 1
-            for i in 1:S:(L + 2P - K + 1)
-                col_slice = @view dX_col[:, (bidx-1)*L_out + col]
+            for i in 1:S:(L+2P-K+1)
+                col_slice = @view dX_col[:, (bidx-1)*L_out+col]
                 patch = reshape(col_slice, K, C)
                 @views dx_padded[i:i+K-1, :, bidx] .+= patch
                 col += 1
@@ -413,31 +482,6 @@ function backward(node::Conv1DOp)
     end
 end
 
-
-
-
-mutable struct MaxPool1DOp{T} <: GraphNode
-    x::GraphNode
-    kernel_size::Int
-    stride::Int
-    output::Union{Nothing, T}
-    gradient::Union{Nothing, T}
-    indices::Union{Nothing, Array{Int}}
-    dx::Union{Nothing, T}
-end
-
-
-# ← типовой (универсальный)
-function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int,
-                     output::Union{Nothing, T}, gradient::Union{Nothing, T},
-                     indices::Union{Nothing, Array{Int}}) where {T}
-    return MaxPool1DOp{T}(x, kernel_size, stride, output, gradient, indices)
-end
-
-function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int)
-    T = eltype(x.output)
-    return MaxPool1DOp{T}(x, kernel_size, stride, nothing, nothing, nothing, nothing)
-end
 
 function forward(node::MaxPool1DOp)
     @inbounds begin
@@ -460,7 +504,7 @@ function forward(node::MaxPool1DOp)
         @threads for b in 1:B
             for c in 1:C
                 for i in 0:out_len-1
-                    r = i*s + 1 : i*s + k
+                    r = i*s+1:i*s+k
                     win = @view x[r, c, b]
                     max_val, max_idx = findmax(win)
                     out[i+1, c, b] = max_val
@@ -506,20 +550,7 @@ function backward(node::MaxPool1DOp)
 end
 
 
-
-
 # === PermuteDimsOp
-mutable struct PermuteDimsOp{T} <: GraphNode
-    x::GraphNode
-    dims::NTuple{3, Int}
-    output::Union{Nothing, T}
-    gradient::Union{Nothing, T}
-end
-
-PermuteDimsOp(x::GraphNode, dims::NTuple{3, Int}) =
-    PermuteDimsOp{eltype(x.output)}(x, dims, nothing, nothing)
-
-
 function forward(node::PermuteDimsOp)
     node.output = permutedims(node.x.output, node.dims)
 end
@@ -529,23 +560,6 @@ function backward(node::PermuteDimsOp)
     grad = permutedims(node.gradient, rev)
     node.x.gradient = isnothing(node.x.gradient) ? grad : node.x.gradient .+ grad
 end
-
-mutable struct EmbeddingOp{T} <: GraphNode
-    weight::Variable{T}
-    indices::Vector{Int}
-    shape::Tuple
-    output::Union{Nothing, AbstractArray{T}}
-    gradient::Union{Nothing, AbstractArray{T}}
-end
-
-
-
-function EmbeddingOp(weight::Variable{T}, indices::Vector{Int}, shape::Tuple) where {T}
-    return EmbeddingOp{T}(weight, indices, shape, nothing, nothing)
-end
-
-
-
 
 function forward(node::EmbeddingOp)
     node.output = reshape(node.weight.output[:, node.indices], node.shape)
