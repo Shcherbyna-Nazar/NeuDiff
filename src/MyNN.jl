@@ -79,7 +79,7 @@ function (layer::Conv1D)(x::MyAD.GraphNode)
                 1,  # stride
                 0,  # padding
                 layer.activation,
-                nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+                nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
 
 # === MaxPool1D Layer ===

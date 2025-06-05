@@ -62,6 +62,35 @@ function create_batches(X, Y; batchsize=64, shuffle=true)
              for i in 1:batchsize:length(idxs)]
 end
 
+using BenchmarkTools
+
+
+function train_one_epoch!(model, params, state, X_train, y_train, batch_size, η)
+    total_loss, total_acc, num_batches = 0.0, 0.0, 0
+    batches = create_batches(X_train, y_train, batchsize=batch_size)
+    for (i, (x, y)) in enumerate(batches)
+        out = model(x)
+        graph = topological_sort(out)
+        forward!(graph)
+
+        ŷ = out.output
+        loss = bce(ŷ, y)
+        acc = accuracy(ŷ, y)
+
+        total_loss += loss
+        total_acc += acc
+        num_batches += 1
+
+        zero_gradients!(model)
+        out.gradient = bce_grad(ŷ, y)
+        backward!(graph, out.gradient)
+        update_adam!(state, params, η)
+    end
+    return total_loss / num_batches, total_acc / num_batches
+end
+
+# @benchmark train_one_epoch!(model, params, state, X_train, y_train, batch_size, η)
+
 # === Training loop ===
 for epoch in 1:epochs
     println("=== Epoch $epoch ===")

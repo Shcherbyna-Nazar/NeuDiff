@@ -74,6 +74,7 @@ mutable struct Conv1DOp{T} <: GraphNode
     W_mat::Union{Nothing,AbstractArray{T}}
     out_mat::Union{Nothing,AbstractArray{T}}
     dx_padded::Union{Nothing,AbstractArray{T}}
+    dX_col::Union{Nothing,AbstractArray{T}}
 end
 function Conv1D(in_channels, out_channels, kernel::Int, activation=identity;
     stride=1, padding=0)
@@ -81,7 +82,7 @@ function Conv1D(in_channels, out_channels, kernel::Int, activation=identity;
         zeros(out_channels, in_channels, kernel))
     b = Variable(zeros(out_channels, 1), zeros(out_channels, 1))
     return x -> Conv1DOp(W, b, x, kernel, stride, padding, activation,
-        nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+        nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
 
 mutable struct MaxPool1DOp{T} <: GraphNode
@@ -432,7 +433,18 @@ function backward(node::Conv1DOp)
         end
 
         W_mat = node.W_mat !== nothing ? node.W_mat : reshape(W, O, :)
-        dX_col = W_mat' * δy_mat
+        # ------------------------------
+        # Preallocate dX_col if needed:
+        dX_col_shape = (size(W_mat, 2), size(δy_mat, 2))
+        if node.dX_col === nothing || size(node.dX_col) != dX_col_shape
+            node.dX_col = zeros(eltype(W_mat), dX_col_shape...)
+        else
+            fill!(node.dX_col, 0)  # optional, mul! overwrites
+        end
+        # In-place matrix multiplication (no allocation!):
+        mul!(node.dX_col, W_mat', δy_mat)
+        dX_col = node.dX_col
+        # ------------------------------
 
         if node.dx_padded === nothing || size(node.dx_padded) != (L + 2P, C, B)
             node.dx_padded = zeros(eltype(x), L + 2P, C, B)
@@ -452,13 +464,10 @@ function backward(node::Conv1DOp)
         end
 
         dx = @view dx_padded[P+1:end-P, :, :]
-        if isnothing(node.input.gradient)
-            node.input.gradient = copy(dx)
-        else
-            node.input.gradient .+= dx
-        end
+        accumulate_grad!(node.input, dx)
     end
 end
+
 
 function backward(node::MaxPool1DOp)
     @inbounds begin
@@ -500,8 +509,15 @@ end
 function backward(node::EmbeddingOp)
     dE = node.gradient
     dE_mat = reshape(dE, size(dE, 1), :)
+    acc = Dict{Int, Vector{eltype(dE_mat)}}()
     for (i, idx) in enumerate(node.indices)
-        node.weight.gradient[:, idx] .+= dE_mat[:, i]
+        if !haskey(acc, idx)
+            acc[idx] = zeros(eltype(dE_mat), size(dE_mat, 1))
+        end
+        @inbounds @views acc[idx] .+= dE_mat[:, i]
+    end
+    for (idx, val) in acc
+        @inbounds @views node.weight.gradient[:, idx] .+= val
     end
 end
 
