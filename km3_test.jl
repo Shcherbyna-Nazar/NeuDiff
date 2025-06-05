@@ -7,10 +7,10 @@ using TimerOutputs, LinearAlgebra
 const TO = TimerOutput()
 
 # === Load data ===
-X_train = Int.(load("data/imdb_dataset_prepared.jld2", "X_train"))
-y_train = reshape(Float32.(load("data/imdb_dataset_prepared.jld2", "y_train")), 1, :)
-X_test = Int.(load("data/imdb_dataset_prepared.jld2", "X_test"))
-y_test = reshape(Float32.(load("data/imdb_dataset_prepared.jld2", "y_test")), 1, :)
+X_train = load("data/imdb_dataset_prepared.jld2", "X_train")
+y_train = load("data/imdb_dataset_prepared.jld2", "y_train")
+X_test = load("data/imdb_dataset_prepared.jld2", "X_test")
+y_test = load("data/imdb_dataset_prepared.jld2", "y_test")
 
 embeddings = load("data/imdb_dataset_prepared.jld2", "embeddings")
 vocab = load("data/imdb_dataset_prepared.jld2", "vocab")
