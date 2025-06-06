@@ -24,9 +24,10 @@ Variable(x::AbstractArray{T}, g::AbstractArray{T}) where {T} = Variable{T}(x, g)
 mutable struct ScalarOperator{F,T} <: GraphNode
     f::F
     inputs::Vector{GraphNode}
-    output::Union{Nothing,T}
-    gradient::Union{Nothing,T}
+    output::Union{Nothing,AbstractArray{T}}  # ✅ allow array output
+    gradient::Union{Nothing,AbstractArray{T}}
 end
+
 ScalarOperator(f::Function, args::GraphNode...) =
     ScalarOperator{typeof(f),eltype(args[1].output)}(f, collect(args), nothing, nothing)
 
@@ -51,9 +52,10 @@ BroadcastedOperator(f::Function, x::GraphNode) =
 mutable struct FlattenOp{T} <: GraphNode
     x::GraphNode
     orig_shape::Tuple
-    output::Union{Nothing,T}
-    gradient::Union{Nothing,T}
+    output::Union{Nothing, AbstractArray{T}}
+    gradient::Union{Nothing, AbstractArray{T}}
 end
+
 function flatten_last_two_dims(x::GraphNode)
     T = eltype(x.output)
     return FlattenOp{T}(x, (), nothing, nothing)
@@ -131,12 +133,16 @@ identity_fn(x) = x
 broadcast_add(a::AbstractMatrix, b::AbstractMatrix) = a .+ b * ones(size(b, 2))
 
 # === Operator Overloading ===
-import Base: +, *, -, /, sin
+import Base: +, *, -, /, sin, ^
+
 +(a::GraphNode, b::GraphNode) = ScalarOperator(+, a, b)
 *(a::GraphNode, b::GraphNode) = ScalarOperator(*, a, b)
 -(a::GraphNode, b::GraphNode) = ScalarOperator(-, a, b)
 (/)(a::GraphNode, b::GraphNode) = ScalarOperator(/, a, b)
 sin(x::GraphNode) = ScalarOperator(sin, x)
+^(a::GraphNode, b::GraphNode) = ScalarOperator(^, a, b)  # Add exponentiation operator overloading
+^(a::GraphNode, b::Number) = ScalarOperator(^, a, Constant(b))  # Exponentiation with constant
+
 
 # === Topological Sort Utilities ===
 function visit_children(::GraphNode, ::Set{GraphNode}, ::Vector{GraphNode})
@@ -196,8 +202,15 @@ function forward!(nodes::Vector{GraphNode})
 end
 
 function forward(node::ScalarOperator)
-    node.output = node.f(map(n -> n.output, node.inputs)...)
+    inputs = map(n -> n.output, node.inputs)
+    if node.f === broadcast_add
+        node.output = broadcast_add(inputs[1], inputs[2])
+    else
+        node.output = [node.f(x...) for x in zip(inputs...)]
+    end
 end
+
+
 function forward(node::MatMulOperator)
     node.output = node.A.output * node.B.output
 end
@@ -361,9 +374,15 @@ function backward(node::ScalarOperator)
         else
             b.gradient = convert.(eltype(b.output), grad_b)
         end
-    elseif f == flatten_last_two_dims_op
-        input = inputs[1]
-        accumulate_grad!(input, reshape(out_grad, size(input.output)))
+    elseif f == ^
+        x, y = inputs
+        # Check if y is a constant scalar
+        if y isa Constant
+            accumulate_grad!(x, out_grad .* y.output .* x.output .^ (y.output .- 1))  # d/dx(x^const)
+        else
+            accumulate_grad!(x, out_grad .* y.output .* x.output .^ (y.output .- 1))  # d/dx(x^y)
+            accumulate_grad!(y, out_grad .* log.(x.output) .* x.output .^ y.output)  # d/dy(x^y)
+        end
     else
         error("Unsupported scalar function $f")
     end
@@ -378,17 +397,20 @@ end
 function backward(node::BroadcastedOperator)
     f, x, out_grad = node.f, node.input, node.gradient
     δ = if f == relu
-        out_grad .* (x.output .> 0)
+        out_grad .* (x.output .>= 0)  # ← здесь фикс
     elseif f == identity_fn
         out_grad
     elseif f == sigmoid
         σ = node.output
         out_grad .* σ .* (1 .- σ)
+    elseif f == tanh
+        out_grad .* (1 .- node.output .^ 2)
     else
         error("Unsupported broadcasted function $f")
     end
     x.gradient = isnothing(x.gradient) ? δ : x.gradient .+ δ
 end
+
 
 function backward(node::Constant) end
 function backward(node::Variable) end
