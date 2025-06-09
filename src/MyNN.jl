@@ -22,7 +22,7 @@ end
 
 function (layer::Dense)(x::MyAD.GraphNode)
     z = MyAD.MatMulOperator(layer.W, x)
-    z = MyAD.ScalarOperator(MyAD.broadcast_add, z, layer.b)
+    z = z + layer.b 
     return MyAD.BroadcastedOperator(layer.activation, z)
 end
 

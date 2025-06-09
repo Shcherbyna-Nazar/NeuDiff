@@ -2,7 +2,7 @@
 module MyAD
 
 export GraphNode, Constant, Variable, ScalarOperator, MatMulOperator, BroadcastedOperator,
-    forward!, backward!, topological_sort, relu, sigmoid, identity_fn, broadcast_add,
+    forward!, backward!, topological_sort, relu, sigmoid, identity_fn,
     Conv1DOp, MaxPool1DOp, PermuteDimsOp, flatten_last_two_dims, flatten_last_two_dims_op
 
 # === Abstract Node Type ===
@@ -11,7 +11,6 @@ abstract type GraphNode end
 # === Basic Nodes ===
 mutable struct Constant{T} <: GraphNode
     output::T
-    gradient::Union{Nothing,T}
 end
 Constant(x::T) where T = Constant{T}(x, nothing)
 
@@ -127,19 +126,17 @@ end
 relu(x) = max.(0, x)
 sigmoid(x) = 1.0 ./ (1.0 .+ exp.(-x))
 identity_fn(x) = x
-broadcast_add(a::AbstractMatrix, b::AbstractMatrix) = a .+ b * ones(size(b, 2))
 
 # === Operator Overloading ===
 import Base: +, *, -, /, sin, ^
 
-+(a::GraphNode, b::GraphNode) = ScalarOperator(+, a, b)
-*(a::GraphNode, b::GraphNode) = ScalarOperator(*, a, b)
--(a::GraphNode, b::GraphNode) = ScalarOperator(-, a, b)
-(/)(a::GraphNode, b::GraphNode) = ScalarOperator(/, a, b)
-sin(x::GraphNode) = ScalarOperator(sin, x)
-^(a::GraphNode, b::GraphNode) = ScalarOperator(^, a, b)  # Add exponentiation operator overloading
-^(a::GraphNode, b::Number) = ScalarOperator(^, a, Constant(b))  # Exponentiation with constant
-
+Base.:+(a::GraphNode, b::GraphNode) = ScalarOperator(+, a, b)
+Base.:*(a::GraphNode, b::GraphNode) = ScalarOperator(*, a, b)
+Base.:-(a::GraphNode, b::GraphNode) = ScalarOperator(-, a, b)
+Base.:/(a::GraphNode, b::GraphNode) = ScalarOperator(/, a, b)
+Base.sin(x::GraphNode) = ScalarOperator(sin, x)
+Base.:^(a::GraphNode, b::GraphNode) = ScalarOperator(^, a, b)
+Base.:^(a::GraphNode, b::Number) = ScalarOperator(^, a, Constant(b))
 
 # === Topological Sort Utilities ===
 function visit_children(::GraphNode, ::Set{GraphNode}, ::Vector{GraphNode})
@@ -200,11 +197,7 @@ end
 
 function forward(node::ScalarOperator)
     inputs = map(n -> n.output, node.inputs)
-    if node.f === broadcast_add
-        node.output = broadcast_add(inputs[1], inputs[2])
-    else
-        node.output = [node.f(x...) for x in zip(inputs...)]
-    end
+    node.output = node.f.(inputs...)
 end
 
 
@@ -344,8 +337,13 @@ end
 function backward(node::ScalarOperator)
     f, inputs, out_grad = node.f, node.inputs, node.gradient
     if f == +
-        for input in inputs
-            accumulate_grad!(input, out_grad)
+        a,b = inputs
+        accumulate_grad!(a, out_grad)
+        if size(b.output) != size(out_grad)
+            grad_b = sum(out_grad, dims=2)
+            accumulate_grad!(b, grad_b)
+        else
+            accumulate_grad!(b, out_grad)
         end
     elseif f == *
         a, b = inputs
@@ -362,15 +360,6 @@ function backward(node::ScalarOperator)
     elseif f == sin
         x = inputs[1]
         accumulate_grad!(x, out_grad .* cos.(x.output))
-    elseif f == broadcast_add
-        a, b = inputs
-        accumulate_grad!(a, out_grad)
-        grad_b = sum(out_grad, dims=2)
-        if !isnothing(b.gradient)
-            b.gradient .+= convert.(eltype(b.gradient), grad_b)
-        else
-            b.gradient = convert.(eltype(b.output), grad_b)
-        end
     elseif f == ^
         x, y = inputs
         # Check if y is a constant scalar
