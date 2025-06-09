@@ -1,3 +1,4 @@
+
 module MyAD
 
 export GraphNode, Constant, Variable, ScalarOperator, MatMulOperator, BroadcastedOperator,
@@ -18,7 +19,6 @@ mutable struct Variable{T} <: GraphNode
     output::AbstractArray{T}
     gradient::AbstractArray{T}
 end
-Variable(x::AbstractArray{T}, g::AbstractArray{T}) where {T} = Variable{T}(x, g)
 
 # === Operator Nodes ===
 mutable struct ScalarOperator{F,T} <: GraphNode
@@ -78,12 +78,9 @@ mutable struct Conv1DOp{T} <: GraphNode
     dx_padded::Union{Nothing,AbstractArray{T}}
     dX_col::Union{Nothing,AbstractArray{T}}
 end
-function Conv1D(in_channels, out_channels, kernel::Int, activation=identity;
-    stride=1, padding=0)
-    W = Variable(randn(out_channels, in_channels, kernel) * sqrt(2 / (in_channels * kernel)),
-        zeros(out_channels, in_channels, kernel))
-    b = Variable(zeros(out_channels, 1), zeros(out_channels, 1))
-    return x -> Conv1DOp(W, b, x, kernel, stride, padding, activation,
+
+function Conv1DOp(W::Variable{T}, b::Union{Variable{T}, Nothing}, input::GraphNode, kernel::Int, stride::Int, padding::Int, activation::Function) where T
+    return Conv1DOp{T}(W, b, input, kernel, stride, padding, activation,
         nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
 

@@ -3,6 +3,8 @@ include("../src/MyAD.jl")
 
 using .MyAD
 using Zygote
+using Flux
+using .MyAD:relu, sigmoid, identity_fn, tanh, broadcast_add
 
 @testset "Scalar addition (a + b)" begin
     a_val, b_val = 3.0f0, 2.0f0
@@ -294,6 +296,28 @@ end
     a = Variable([a_val], [0.0f0])
     b = Variable([b_val], [0.0f0])
     out = a^2 + b
+    graph = topological_sort(out)
+
+    forward!(graph)
+    @test isapprox(out.output[1], y_zyg; atol=1e-6)
+
+    backward!(graph, [1.0f0])
+    @test isapprox(a.gradient[1], grad_zyg[1]; atol=1e-6)
+    @test isapprox(b.gradient[1], grad_zyg[2]; atol=1e-6)
+end
+
+@testset "Scalar Expression a^2 + b^2" begin
+    a_val, b_val = 3.0f0, 2.0f0
+
+    # Zygote ground truth
+    f_zyg(a, b) = a^2 + b^2
+    y_zyg, back_zyg = Zygote.pullback(f_zyg, a_val, b_val)
+    grad_zyg = back_zyg(1.0)
+
+    # MyAD
+    a = Variable([a_val], [0.0f0])
+    b = Variable([b_val], [0.0f0])
+    out = a^2 + b^2
     graph = topological_sort(out)
 
     forward!(graph)

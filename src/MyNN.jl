@@ -78,8 +78,8 @@ function (layer::Conv1D)(x::MyAD.GraphNode)
                 size(layer.W.output, 3),  # kernel size
                 1,  # stride
                 0,  # padding
-                layer.activation,
-                nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+                layer.activation
+            )
 end
 
 # === MaxPool1D Layer ===
