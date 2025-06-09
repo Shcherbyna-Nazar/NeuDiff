@@ -1,9 +1,11 @@
-
 module MyAD
 
 export GraphNode, Constant, Variable, ScalarOperator, MatMulOperator, BroadcastedOperator,
     forward!, backward!, topological_sort, relu, sigmoid, identity_fn,
     Conv1DOp, MaxPool1DOp, PermuteDimsOp, flatten_last_two_dims, flatten_last_two_dims_op
+
+using Base.Threads: @threads
+using LinearAlgebra: mul!
 
 # === Abstract Node Type ===
 abstract type GraphNode end
@@ -12,18 +14,19 @@ abstract type GraphNode end
 mutable struct Constant{T} <: GraphNode
     output::T
 end
-Constant(x::T) where T = Constant{T}(x, nothing)
+
+Constant(x::T) where T = Constant{T}(x)
 
 mutable struct Variable{T} <: GraphNode
     output::AbstractArray{T}
-    gradient::AbstractArray{T}
+    gradient::Union{Nothing,AbstractArray{T}}
 end
 
 # === Operator Nodes ===
 mutable struct ScalarOperator{F,T} <: GraphNode
     f::F
     inputs::Vector{GraphNode}
-    output::Union{Nothing,AbstractArray{T}}  # ✅ allow array output
+    output::Union{Nothing,AbstractArray{T}}
     gradient::Union{Nothing,AbstractArray{T}}
 end
 
@@ -36,6 +39,7 @@ mutable struct MatMulOperator{T} <: GraphNode
     output::Union{Nothing,AbstractMatrix{T}}
     gradient::Union{Nothing,AbstractMatrix{T}}
 end
+
 MatMulOperator(A::GraphNode, B::GraphNode) =
     MatMulOperator{eltype(A.output)}(A, B, nothing, nothing)
 
@@ -45,6 +49,7 @@ mutable struct BroadcastedOperator{F,T} <: GraphNode
     output::Union{Nothing,AbstractArray{T}}
     gradient::Union{Nothing,AbstractArray{T}}
 end
+
 BroadcastedOperator(f::Function, x::GraphNode) =
     BroadcastedOperator{typeof(f),eltype(x.output)}(f, x, nothing, nothing)
 
@@ -57,7 +62,7 @@ end
 
 function flatten_last_two_dims(x::GraphNode)
     T = eltype(x.output)
-    return FlattenOp{T}(x, (), nothing, nothing)
+    FlattenOp{T}(x, (), nothing, nothing)
 end
 
 mutable struct Conv1DOp{T} <: GraphNode
@@ -79,7 +84,7 @@ mutable struct Conv1DOp{T} <: GraphNode
 end
 
 function Conv1DOp(W::Variable{T}, b::Union{Variable{T}, Nothing}, input::GraphNode, kernel::Int, stride::Int, padding::Int, activation::Function) where T
-    return Conv1DOp{T}(W, b, input, kernel, stride, padding, activation,
+    Conv1DOp{T}(W, b, input, kernel, stride, padding, activation,
         nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
 
@@ -92,14 +97,10 @@ mutable struct MaxPool1DOp{T} <: GraphNode
     indices::Union{Nothing,Array{Int}}
     dx::Union{Nothing,T}
 end
-function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int,
-    output::Union{Nothing,T}, gradient::Union{Nothing,T},
-    indices::Union{Nothing,Array{Int}}) where {T}
-    return MaxPool1DOp{T}(x, kernel_size, stride, output, gradient, indices)
-end
+
 function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int)
     T = eltype(x.output)
-    return MaxPool1DOp{T}(x, kernel_size, stride, nothing, nothing, nothing, nothing)
+    MaxPool1DOp{T}(x, kernel_size, stride, nothing, nothing, nothing, nothing)
 end
 
 mutable struct PermuteDimsOp{T} <: GraphNode
@@ -108,6 +109,7 @@ mutable struct PermuteDimsOp{T} <: GraphNode
     output::Union{Nothing,T}
     gradient::Union{Nothing,T}
 end
+
 PermuteDimsOp(x::GraphNode, dims::NTuple{3,Int}) =
     PermuteDimsOp{eltype(x.output)}(x, dims, nothing, nothing)
 
@@ -118,13 +120,14 @@ mutable struct EmbeddingOp{T} <: GraphNode
     output::Union{Nothing,AbstractArray{T}}
     gradient::Union{Nothing,AbstractArray{T}}
 end
+
 function EmbeddingOp(weight::Variable{T}, indices::Vector{Int}, shape::Tuple) where {T}
-    return EmbeddingOp{T}(weight, indices, shape, nothing, nothing)
+    EmbeddingOp{T}(weight, indices, shape, nothing, nothing)
 end
 
 # === Activation Functions ===
-relu(x) = max.(0, x)
-sigmoid(x) = 1.0 ./ (1.0 .+ exp.(-x))
+relu(x) = max.(zero(eltype(x)), x)
+sigmoid(x) = one(eltype(x)) ./ (one(eltype(x)) .+ exp.(-x))
 identity_fn(x) = x
 
 # === Operator Overloading ===
@@ -139,39 +142,47 @@ Base.:^(a::GraphNode, b::GraphNode) = ScalarOperator(^, a, b)
 Base.:^(a::GraphNode, b::Number) = ScalarOperator(^, a, Constant(b))
 
 # === Topological Sort Utilities ===
-function visit_children(::GraphNode, ::Set{GraphNode}, ::Vector{GraphNode})
-    return nothing
-end
-function visit_children(node::ScalarOperator{F,T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {F,T}
+function visit_children(node::ScalarOperator, visited::Set{GraphNode}, order::Vector{GraphNode})
     for x in node.inputs
         visit(x, visited, order)
     end
 end
-function visit_children(node::MatMulOperator{T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {T}
+
+function visit_children(node::MatMulOperator, visited::Set{GraphNode}, order::Vector{GraphNode})
     visit(node.A, visited, order)
     visit(node.B, visited, order)
 end
-function visit_children(node::BroadcastedOperator{F,T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {F,T}
+
+function visit_children(node::BroadcastedOperator, visited::Set{GraphNode}, order::Vector{GraphNode})
     visit(node.input, visited, order)
 end
-function visit_children(node::Conv1DOp{T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {T}
+
+function visit_children(node::Conv1DOp, visited::Set{GraphNode}, order::Vector{GraphNode})
     visit(node.W, visited, order)
     if node.b !== nothing
         visit(node.b, visited, order)
     end
     visit(node.input, visited, order)
 end
-function visit_children(node::MaxPool1DOp{T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {T}
+
+function visit_children(node::MaxPool1DOp, visited::Set{GraphNode}, order::Vector{GraphNode})
     visit(node.x, visited, order)
 end
-function visit_children(node::PermuteDimsOp{T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {T}
+
+function visit_children(node::PermuteDimsOp, visited::Set{GraphNode}, order::Vector{GraphNode})
     visit(node.x, visited, order)
 end
-function visit_children(node::FlattenOp{T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {T}
+
+function visit_children(node::FlattenOp, visited::Set{GraphNode}, order::Vector{GraphNode})
     visit(node.x, visited, order)
 end
-function visit_children(node::EmbeddingOp{T}, visited::Set{GraphNode}, order::Vector{GraphNode}) where {T}
+
+function visit_children(node::EmbeddingOp, visited::Set{GraphNode}, order::Vector{GraphNode})
     visit(node.weight, visited, order)
+end
+
+function visit_children(::GraphNode, ::Set{GraphNode}, ::Vector{GraphNode})
+    # fallback for unsupported GraphNode types: no children
 end
 
 function visit(node::GraphNode, visited::Set{GraphNode}, order::Vector{GraphNode})
@@ -181,11 +192,13 @@ function visit(node::GraphNode, visited::Set{GraphNode}, order::Vector{GraphNode
         push!(order, node)
     end
 end
+
+
 function topological_sort(root::GraphNode)
     visited = Set{GraphNode}()
     order = Vector{GraphNode}()
     visit(root, visited, order)
-    return order
+    order
 end
 
 # === Forward Pass ===
@@ -200,61 +213,40 @@ function forward(node::ScalarOperator)
     node.output = node.f.(inputs...)
 end
 
-
 function forward(node::MatMulOperator)
     node.output = node.A.output * node.B.output
 end
+
 function forward(node::BroadcastedOperator)
     node.output = node.f.(node.input.output)
 end
+
 function forward(node::Constant) end
 function forward(node::Variable) end
-function forward(node::GraphNode)
-    error("No forward method defined for type $(typeof(node))")
-end
 
 function forward(node::FlattenOp)
     node.orig_shape = size(node.x.output)
     node.output = reshape(node.x.output, :, size(node.x.output, ndims(node.x.output)))
 end
 
-using Base.Threads: @threads
-using LinearAlgebra: mul!
-
 function forward(node::Conv1DOp)
     @inbounds begin
-        x = node.input.output
-        W = node.W.output
-        b = node.b === nothing ? nothing : node.b.output
-
+        x, W, b = node.input.output, node.W.output, node.b === nothing ? nothing : node.b.output
         L, C, B = size(x)
-        K = node.kernel
-        S = node.stride
-        P = node.padding
+        K, S, P = node.kernel, node.stride, node.padding
+        L_p, L_out, O = L + 2P, div(L + 2P - K, S) + 1, size(W, 1)
 
-        L_p = L + 2P
-        L_out = div(L_p - K, S) + 1
-        O = size(W, 1)
-
-        if node.x_padded === nothing || size(node.x_padded) != (L_p, C, B)
-            node.x_padded = zeros(eltype(x), L_p, C, B)
-        end
+        node.x_padded = node.x_padded !== nothing && size(node.x_padded) == (L_p, C, B) ? node.x_padded : zeros(eltype(x), L_p, C, B)
         @views node.x_padded[P+1:end-P, :, :] .= x
         x_padded = node.x_padded
 
-        if node.X_col === nothing || size(node.X_col) != (C * K, L_out * B)
-            node.X_col = zeros(eltype(x), C * K, L_out * B)
-        end
+        node.X_col = node.X_col !== nothing && size(node.X_col) == (C * K, L_out * B) ? node.X_col : zeros(eltype(x), C * K, L_out * B)
         X_col = node.X_col
 
-        if node.W_mat === nothing || size(node.W_mat) != (O, C * K)
-            node.W_mat = reshape(W, O, :)
-        end
+        node.W_mat = node.W_mat !== nothing && size(node.W_mat) == (O, C * K) ? node.W_mat : reshape(W, O, :)
         W_mat = node.W_mat
 
-        if node.out_mat === nothing || size(node.out_mat) != (O, L_out * B)
-            node.out_mat = zeros(eltype(x), O, L_out * B)
-        end
+        node.out_mat = node.out_mat !== nothing && size(node.out_mat) == (O, L_out * B) ? node.out_mat : zeros(eltype(x), O, L_out * B)
         out_mat = node.out_mat
 
         @threads for bidx in 1:B
@@ -286,15 +278,9 @@ function forward(node::MaxPool1DOp)
         k, s = node.kernel_size, node.stride
         out_len = div(L - k, s) + 1
 
-        if node.output === nothing || size(node.output) != (out_len, C, B)
-            node.output = zeros(eltype(x), out_len, C, B)
-        end
-        if node.indices === nothing || size(node.indices) != (out_len, C, B)
-            node.indices = zeros(Int, out_len, C, B)
-        end
-
-        out = node.output
-        idx = node.indices
+        node.output = node.output !== nothing && size(node.output) == (out_len, C, B) ? node.output : zeros(eltype(x), out_len, C, B)
+        node.indices = node.indices !== nothing && size(node.indices) == (out_len, C, B) ? node.indices : zeros(Int, out_len, C, B)
+        out, idx = node.output, node.indices
 
         @threads for b in 1:B
             for c in 1:C
@@ -318,12 +304,19 @@ function forward(node::EmbeddingOp)
     node.output = reshape(node.weight.output[:, node.indices], node.shape)
 end
 
+function forward(node::GraphNode)
+    error("No forward method defined for type $(typeof(node))")
+end
+
 # === Backward Pass ===
 function accumulate_grad!(x::GraphNode, dx)
     if isnothing(x.gradient)
-        x.gradient = dx
+        x.gradient = similar(dx)
+        x.gradient .= dx
     else
-        x.gradient .+= dx
+        @inbounds @simd for i in eachindex(x.gradient)
+            x.gradient[i] += dx[i]
+        end
     end
 end
 
@@ -337,7 +330,7 @@ end
 function backward(node::ScalarOperator)
     f, inputs, out_grad = node.f, node.inputs, node.gradient
     if f == +
-        a,b = inputs
+        a, b = inputs
         accumulate_grad!(a, out_grad)
         if size(b.output) != size(out_grad)
             grad_b = sum(out_grad, dims=2)
@@ -362,12 +355,11 @@ function backward(node::ScalarOperator)
         accumulate_grad!(x, out_grad .* cos.(x.output))
     elseif f == ^
         x, y = inputs
-        # Check if y is a constant scalar
         if y isa Constant
-            accumulate_grad!(x, out_grad .* y.output .* x.output .^ (y.output .- 1))  # d/dx(x^const)
+            accumulate_grad!(x, out_grad .* y.output .* x.output .^ (y.output .- 1))
         else
-            accumulate_grad!(x, out_grad .* y.output .* x.output .^ (y.output .- 1))  # d/dx(x^y)
-            accumulate_grad!(y, out_grad .* log.(x.output) .* x.output .^ y.output)  # d/dy(x^y)
+            accumulate_grad!(x, out_grad .* y.output .* x.output .^ (y.output .- 1))
+            accumulate_grad!(y, out_grad .* log.(x.output) .* x.output .^ y.output)
         end
     else
         error("Unsupported scalar function $f")
@@ -383,7 +375,7 @@ end
 function backward(node::BroadcastedOperator)
     f, x, out_grad = node.f, node.input, node.gradient
     δ = if f == relu
-        out_grad .* (x.output .>= 0)  # ← здесь фикс
+        out_grad .* (x.output .>= 0)
     elseif f == identity_fn
         out_grad
     elseif f == sigmoid
@@ -394,38 +386,30 @@ function backward(node::BroadcastedOperator)
     else
         error("Unsupported broadcasted function $f")
     end
-    x.gradient = isnothing(x.gradient) ? δ : x.gradient .+ δ
+    accumulate_grad!(x, δ)
 end
-
 
 function backward(node::Constant) end
 function backward(node::Variable) end
-function backward(node::GraphNode)
-    error("No backward method defined for type $(typeof(node))")
-end
 
 function backward(node::FlattenOp)
     grad = reshape(node.gradient, node.orig_shape)
-    node.x.gradient = isnothing(node.x.gradient) ? grad : node.x.gradient .+ grad
+    accumulate_grad!(node.x, grad)
 end
 
 function backward(node::Conv1DOp)
     @inbounds begin
-        δy = node.gradient
-        x = node.input.output
-        W = node.W.output
-
+        δy, x, W = node.gradient, node.input.output, node.W.output
         L, C, B = size(x)
         O, _, K = size(W)
-        S = node.stride
-        P = node.padding
+        S, P = node.stride, node.padding
         L_out = size(δy, 1)
 
         if node.activation == relu
-            @. δy = δy * (node.output > 0)
+            δy = δy .* (node.output .> 0)
         elseif node.activation == sigmoid
             σ = node.output
-            @. δy = δy * σ * (1 - σ)
+            δy = δy .* σ .* (1 .- σ)
         elseif node.activation != identity_fn
             error("Unsupported activation function")
         end
@@ -433,32 +417,20 @@ function backward(node::Conv1DOp)
         δy_mat = reshape(permutedims(δy, (2, 1, 3)), O, L_out * B)
         X_col = node.X_col
         dW_mat = δy_mat * X_col'
-        node.W.gradient .= reshape(dW_mat, size(W))
+        node.W.gradient = isnothing(node.W.gradient) ? reshape(dW_mat, size(W)) : (node.W.gradient .+= reshape(dW_mat, size(W)))
 
         if node.b !== nothing
             db = sum(δy_mat, dims=2)
-            node.b.gradient .= reshape(db, size(node.b.output))
+            node.b.gradient = isnothing(node.b.gradient) ? reshape(db, size(node.b.output)) : (node.b.gradient .+= reshape(db, size(node.b.output)))
         end
 
         W_mat = node.W_mat !== nothing ? node.W_mat : reshape(W, O, :)
-        # ------------------------------
-        # Preallocate dX_col if needed:
         dX_col_shape = (size(W_mat, 2), size(δy_mat, 2))
-        if node.dX_col === nothing || size(node.dX_col) != dX_col_shape
-            node.dX_col = zeros(eltype(W_mat), dX_col_shape...)
-        else
-            fill!(node.dX_col, 0)  # optional, mul! overwrites
-        end
-        # In-place matrix multiplication (no allocation!):
+        node.dX_col = node.dX_col !== nothing && size(node.dX_col) == dX_col_shape ? node.dX_col : zeros(eltype(W_mat), dX_col_shape...)
         mul!(node.dX_col, W_mat', δy_mat)
         dX_col = node.dX_col
-        # ------------------------------
 
-        if node.dx_padded === nothing || size(node.dx_padded) != (L + 2P, C, B)
-            node.dx_padded = zeros(eltype(x), L + 2P, C, B)
-        else
-            fill!(node.dx_padded, 0)
-        end
+        node.dx_padded = node.dx_padded !== nothing && size(node.dx_padded) == (L + 2P, C, B) ? (fill!(node.dx_padded, 0); node.dx_padded) : zeros(eltype(x), L + 2P, C, B)
         dx_padded = node.dx_padded
 
         @threads for bidx in 1:B
@@ -476,20 +448,13 @@ function backward(node::Conv1DOp)
     end
 end
 
-
 function backward(node::MaxPool1DOp)
     @inbounds begin
-        x = node.x
-        dy = node.gradient
-        idx = node.indices
+        x, dy, idx = node.x, node.gradient, node.indices
         L_out, C, B = size(dy)
         L, _, _ = size(x.output)
 
-        if node.dx === nothing || size(node.dx) != size(x.output)
-            node.dx = zeros(eltype(x.output), size(x.output))
-        else
-            fill!(node.dx, 0)
-        end
+        node.dx = node.dx !== nothing && size(node.dx) == size(x.output) ? (fill!(node.dx, 0); node.dx) : zeros(eltype(x.output), size(x.output))
         dx = node.dx
 
         @threads for b in 1:B
@@ -500,18 +465,14 @@ function backward(node::MaxPool1DOp)
             end
         end
 
-        if isnothing(x.gradient)
-            x.gradient = copy(dx)
-        else
-            x.gradient .+= dx
-        end
+        accumulate_grad!(x, dx)
     end
 end
 
 function backward(node::PermuteDimsOp)
     rev = invperm(node.dims)
     grad = permutedims(node.gradient, rev)
-    node.x.gradient = isnothing(node.x.gradient) ? grad : node.x.gradient .+ grad
+    accumulate_grad!(node.x, grad)
 end
 
 function backward(node::EmbeddingOp)
@@ -519,14 +480,16 @@ function backward(node::EmbeddingOp)
     dE_mat = reshape(dE, size(dE, 1), :)
     acc = Dict{Int, Vector{eltype(dE_mat)}}()
     for (i, idx) in enumerate(node.indices)
-        if !haskey(acc, idx)
-            acc[idx] = zeros(eltype(dE_mat), size(dE_mat, 1))
-        end
+        acc[idx] = get!(acc, idx, zeros(eltype(dE_mat), size(dE_mat, 1)))
         @inbounds @views acc[idx] .+= dE_mat[:, i]
     end
     for (idx, val) in acc
         @inbounds @views node.weight.gradient[:, idx] .+= val
     end
+end
+
+function backward(node::GraphNode)
+    error("No backward method defined for type $(typeof(node))")
 end
 
 end  # module

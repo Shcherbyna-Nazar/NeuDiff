@@ -4,7 +4,7 @@ include("../src/MyAD.jl")
 using .MyAD
 using Zygote
 using Flux
-using .MyAD:relu, sigmoid, identity_fn, tanh, broadcast_add
+using .MyAD: relu, sigmoid, identity_fn, tanh, flatten_last_two_dims
 
 @testset "Scalar addition (a + b)" begin
     a_val, b_val = 3.0f0, 2.0f0
@@ -17,7 +17,7 @@ using .MyAD:relu, sigmoid, identity_fn, tanh, broadcast_add
     # MyAD
     a = Variable([a_val], [0.0f0])
     b = Variable([b_val], [0.0f0])
-    out = ScalarOperator(+, a, b)
+    out = a + b
     graph = topological_sort(out)
 
     forward!(graph)
@@ -39,7 +39,7 @@ end
     # MyAD
     a = Variable([a_val], [0.0f0])
     b = Variable([b_val], [0.0f0])
-    out = ScalarOperator(*, a, b)
+    out = a * b
     graph = topological_sort(out)
 
     forward!(graph)
@@ -61,7 +61,7 @@ end
     # MyAD
     a = Variable([a_val], [0.0f0])
     b = Variable([b_val], [0.0f0])
-    out = ScalarOperator(/, a, b)
+    out = a / b
     graph = topological_sort(out)
 
     forward!(graph)
@@ -81,7 +81,7 @@ end
 
     a = Variable([a_val], [0.0f0])
     b = Variable([b_val], [0.0f0])
-    out = ScalarOperator(-, a, b)
+    out = a - b
     graph = topological_sort(out)
 
     forward!(graph)
@@ -115,10 +115,9 @@ end
     @test isapprox(B.gradient, grad_zyg[2]; atol=1e-5)
 end
 
-
 @testset "ReLU activation" begin
     x_val = Float32.([-1.0, 0.0, 1.0, 2.0])
-    
+
     f_zyg(x) = relu.(x)
     y_zyg, back_zyg = Zygote.pullback(f_zyg, x_val)
     grad_zyg = back_zyg(ones(Float32, 4))
@@ -136,7 +135,7 @@ end
 
 @testset "Sigmoid activation" begin
     x_val = Float32.([-1.0, 0.0, 1.0, 2.0])
-    
+
     f_zyg(x) = sigmoid.(x)
     y_zyg, back_zyg = Zygote.pullback(f_zyg, x_val)
     grad_zyg = back_zyg(ones(Float32, 4))
@@ -154,7 +153,7 @@ end
 
 @testset "Identity activation" begin
     x_val = Float32.([-1.0, 0.0, 1.0, 2.0])
-    
+
     f_zyg(x) = identity.(x)
     y_zyg, back_zyg = Zygote.pullback(f_zyg, x_val)
     grad_zyg = back_zyg(ones(Float32, 4))
@@ -172,7 +171,7 @@ end
 
 @testset "Tanh activation" begin
     x_val = Float32.([-1.0, 0.0, 1.0, 2.0])
-    
+
     f_zyg(x) = tanh.(x)
     y_zyg, back_zyg = Zygote.pullback(f_zyg, x_val)
     grad_zyg = back_zyg(ones(Float32, 4))
@@ -201,9 +200,7 @@ end
     x = Variable(x_val, zeros(Float32, size(x_val)))
     b = Variable(b_val, zeros(Float32, size(b_val)))
 
-    z1 = MatMulOperator(A, x)
-    z2 = ScalarOperator(broadcast_add, z1, b)
-    out = BroadcastedOperator(sigmoid, z2)
+    out = BroadcastedOperator(sigmoid, MatMulOperator(A, x) + b)
 
     graph = topological_sort(out)
 
@@ -250,7 +247,7 @@ end
     b = Variable([b_val], [0.0f0])
     c = Variable([c_val], [0.0f0])
 
-    out = a*b + c
+    out = a * b + c
 
     graph = topological_sort(out)
     forward!(graph)
@@ -327,3 +324,4 @@ end
     @test isapprox(a.gradient[1], grad_zyg[1]; atol=1e-6)
     @test isapprox(b.gradient[1], grad_zyg[2]; atol=1e-6)
 end
+
