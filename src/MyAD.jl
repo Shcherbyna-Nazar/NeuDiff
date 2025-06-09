@@ -92,11 +92,12 @@ mutable struct MaxPool1DOp{T} <: GraphNode
     x::GraphNode
     kernel_size::Int
     stride::Int
-    output::Union{Nothing,T}
-    gradient::Union{Nothing,T}
-    indices::Union{Nothing,Array{Int}}
-    dx::Union{Nothing,T}
+    output::Union{Nothing, Array{T, 3}}    # ✅ теперь корректно
+    gradient::Union{Nothing, Array{T, 3}}  # ✅
+    indices::Union{Nothing, Array{Int}}    # ✅
+    dx::Union{Nothing, Array{T, 3}}        # ✅
 end
+
 
 function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int)
     T = eltype(x.output)
@@ -106,8 +107,8 @@ end
 mutable struct PermuteDimsOp{T} <: GraphNode
     x::GraphNode
     dims::NTuple{3,Int}
-    output::Union{Nothing,T}
-    gradient::Union{Nothing,T}
+    output::Union{Nothing, AbstractArray{T}}
+    gradient::Union{Nothing, AbstractArray{T}}
 end
 
 PermuteDimsOp(x::GraphNode, dims::NTuple{3,Int}) =
