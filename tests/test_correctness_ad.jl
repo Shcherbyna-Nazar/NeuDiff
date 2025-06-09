@@ -325,3 +325,26 @@ end
     @test isapprox(b.gradient[1], grad_zyg[2]; atol=1e-6)
 end
 
+@testset "MaxPool1D operation compared with Flux/Zygote" begin
+    x_val = reshape(Float32.(1:12), (6, 2, 1))  # L=6, C=2, B=1
+    x = Variable(x_val, zeros(Float32, size(x_val)))
+    pool = MaxPool1DOp(x, 2, 2)
+
+    # MyAD forward
+    graph = topological_sort(pool)
+    forward!(graph)
+
+    # Flux forward
+    flux_out = maxpool(x_val, (2,), stride=(2,))
+    @test isapprox(pool.output, flux_out; atol=1e-6)
+
+    # MyAD backward
+    backward!(graph, ones(Float32, size(pool.output)))
+
+    # Zygote gradient
+    f_zyg(x) = maxpool(x, (2,), stride=(2,))
+    _, back_zyg = Zygote.pullback(f_zyg, x_val)
+    grad_zyg = back_zyg(ones(Float32, size(flux_out)))[1]
+
+    @test isapprox(x.gradient, grad_zyg; atol=1e-6)
+end
