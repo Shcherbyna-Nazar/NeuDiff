@@ -348,3 +348,86 @@ end
 
     @test isapprox(x.gradient, grad_zyg; atol=1e-6)
 end
+
+@testset "EmbeddingOp forward and backward" begin
+    vocab_size = 10
+    embedding_dim = 4
+    sequence = [2 5 3; 1 4 2]  # (2, 3) -> sequence_length=2, batch_size=3
+
+    # Flux/Zygote ground truth
+    weights = randn(Float32, embedding_dim, vocab_size)
+    f_zyg(w) = reshape(w[:, vec(sequence)], (embedding_dim, size(sequence, 1), size(sequence, 2)))
+    y_zyg, back_zyg = Zygote.pullback(f_zyg, weights)
+    dy = ones(Float32, size(y_zyg))
+    grad_zyg = back_zyg(dy)[1]
+
+    # MyAD
+    W = Variable(copy(weights), zeros(Float32, size(weights)))
+    embed = MyAD.EmbeddingOp(W, vec(sequence), (embedding_dim, size(sequence)...))
+
+    graph = topological_sort(embed)
+    forward!(graph)
+    @test isapprox(embed.output, y_zyg; atol=1e-6)
+
+    backward!(graph, dy)
+    @test isapprox(W.gradient, grad_zyg; atol=1e-6)
+end
+
+@testset "PermuteDimsOp forward and backward" begin
+    x_val = rand(Float32, 2, 3, 4)
+
+    # Zygote reference
+    f_zyg(x) = permutedims(x, (3, 1, 2))
+    y_zyg, back_zyg = Zygote.pullback(f_zyg, x_val)
+    grad_zyg = back_zyg(ones(Float32, size(f_zyg(x_val))))[1]
+
+    # MyAD
+    x = Variable(x_val, zeros(Float32, size(x_val)))
+    z = PermuteDimsOp(x, (3, 1, 2))
+    graph = topological_sort(z)
+
+    forward!(graph)
+    @test isapprox(z.output, y_zyg; atol=1e-6)
+
+    backward!(graph, ones(Float32, size(y_zyg)))
+    @test isapprox(x.gradient, grad_zyg; atol=1e-6)
+end
+
+@testset "Embedding -> Flatten -> Dense" begin
+    vocab_size = 5
+    embedding_dim = 3
+    sequence = [1 2; 3 4]  # shape: (2, 2) sequence_length=2, batch_size=2
+
+    weights = randn(Float32, embedding_dim, vocab_size)
+    dense_W = randn(Float32, 4, embedding_dim * size(sequence, 1))
+    dense_b = randn(Float32, 4, 1)
+
+    # Zygote reference
+    f_zyg(w_embed, w_dense, b_dense) = begin
+        emb = reshape(w_embed[:, vec(sequence)], (embedding_dim, size(sequence)...))
+        flat = reshape(emb, :, size(sequence, 2))  # flatten (E, L, B) -> (E*L, B)
+        sigmoid.(w_dense * flat .+ b_dense)
+    end
+    y_zyg, back_zyg = Zygote.pullback(f_zyg, weights, dense_W, dense_b)
+    grad_zyg = back_zyg(ones(Float32, 4, size(sequence, 2)))
+
+    # MyAD
+    embed = Variable(copy(weights), zeros(Float32, size(weights)))
+    denseW = Variable(copy(dense_W), zeros(Float32, size(dense_W)))
+    denseB = Variable(copy(dense_b), zeros(Float32, size(dense_b)))
+
+    x = MyAD.EmbeddingOp(embed, vec(sequence), (embedding_dim, size(sequence)...))
+    flat = flatten_last_two_dims(x)
+    out = BroadcastedOperator(sigmoid, MatMulOperator(denseW, flat) + denseB)
+
+    graph = topological_sort(out)
+    forward!(graph)
+    @test isapprox(out.output, y_zyg; atol=1e-5)
+
+    backward!(graph, ones(Float32, size(out.output)))
+    @test isapprox(embed.gradient, grad_zyg[1]; atol=1e-5)
+    @test isapprox(denseW.gradient, grad_zyg[2]; atol=1e-5)
+    @test isapprox(denseB.gradient, grad_zyg[3]; atol=1e-5)
+end
+
+
