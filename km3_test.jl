@@ -27,7 +27,8 @@ model = Chain(
     flatten_last_two_dims,
     Dense(128, 1, sigmoid)
 )
-model.layers[1].weight.output = embeddings  # Set pretrained weights
+model.layers[1].weight.output = embeddings
+
 
 # === Loss and accuracy ===
 function bce(ŷ, y)

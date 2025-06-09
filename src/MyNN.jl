@@ -43,7 +43,7 @@ end
 function Embedding(vocab_size::Int, embedding_dim::Int; pretrained_weights=nothing)
     T = Float32
     weights = pretrained_weights === nothing ? randn(T, embedding_dim, vocab_size) * sqrt(T(1) / vocab_size) : pretrained_weights
-    w_var = MyAD.Variable(weights, zeros(T, size(weights)))
+    w_var = MyAD.Variable(weights, zeros(T, size(weights)...))
     Embedding(w_var)
 end
 
@@ -56,25 +56,37 @@ end
 
 # === Conv1D Layer ===
 struct Conv1D{T, F}
-    W::MyAD.Variable{T}  # (out_channels, in_channels, kernel_size)
-    b::MyAD.Variable{T}  # (out_channels, 1)
+    W::MyAD.Variable{T}          # (kernel_size, in_channels, out_channels)
+    b::MyAD.Variable{T}          # (out_channels, 1)
     activation::F
 end
 
 function Conv1D(in_channels::Int, out_channels::Int, kernel_size::Int, act = MyAD.identity_fn)
     T = Float32
     std = act === MyAD.relu ? sqrt(T(2) / (in_channels * kernel_size)) : sqrt(T(1) / (in_channels * kernel_size))
-    W = MyAD.Variable(randn(T, out_channels, in_channels, kernel_size) * std, zeros(T, out_channels, in_channels, kernel_size))
+
+    # Shape: (kernel_size, in_channels, out_channels)
+    W = MyAD.Variable(
+        randn(T, kernel_size, in_channels, out_channels) * std,
+        zeros(T, kernel_size, in_channels, out_channels)
+    )
+
     b = MyAD.Variable(zeros(T, out_channels, 1), zeros(T, out_channels, 1))
-    Conv1D(W, b, act)
+
+    Conv1D{T, typeof(act)}(W, b, act)
 end
 
-function (layer::Conv1D)(x::MyAD.GraphNode)
-    MyAD.Conv1DOp(layer.W, layer.b, x,
-                  size(layer.W.output, 3),  # kernel size
-                  1,                        # stride
-                  0,                        # padding
-                  layer.activation)
+# Forward pass application: x is a MyAD.GraphNode
+function (layer::Conv1D{T, F})(x::MyAD.GraphNode) where {T, F}
+    MyAD.Conv1DOp(
+        layer.W,
+        layer.b,
+        x,
+        size(layer.W.output, 1),  # kernel size (K)
+        1,                        # stride
+        0,                        # padding
+        layer.activation
+    )
 end
 
 # === MaxPool1D Layer ===

@@ -430,4 +430,43 @@ end
     @test isapprox(denseB.gradient, grad_zyg[3]; atol=1e-5)
 end
 
+@testset "Conv1DOp correctness test" begin
+    L, C, B = 10, 3, 2
+    K, O = 3, 4
 
+    x = rand(Float32, L, C, B)
+    W = rand(Float32, K, C, O)
+    b = rand(Float32, O)
+
+    # Flux Conv1D reference (initialize once)
+    flux_conv = Flux.Conv((K,), C => O, identity; stride=1, pad=0)
+    flux_conv.weight .= W
+    flux_conv.bias .= b
+
+    flux_output = flux_conv(x)
+
+    # MyAD forward pass
+    x_var = Variable(x, zeros(Float32, size(x)))
+    W_var = Variable(W, zeros(Float32, size(W)))
+    b_var = Variable(reshape(b, O, 1), zeros(Float32, O, 1))
+
+    myad_conv = Conv1DOp(W_var, b_var, x_var, K, 1, 0, identity_fn)
+    nodes = topological_sort(myad_conv)
+    forward!(nodes)
+    myad_output = myad_conv.output
+
+    @test isapprox(myad_output, flux_output; atol=1e-5)
+
+    # Flux backward pass
+    flux_loss(x, W, b) = sum(Flux.Conv((K,), C => O, identity; stride=1, pad=0, init=(o,i,kwargs...)->W, bias=b)(x))
+    flux_grads = Zygote.gradient(flux_loss, x, W, b)
+
+    # MyAD backward pass
+    backward!(nodes, ones(Float32, size(myad_output)))
+
+    @test isapprox(x_var.gradient, flux_grads[1]; atol=1e-5)
+    @test isapprox(W_var.gradient, flux_grads[2]; atol=1e-5)
+    @test isapprox(vec(b_var.gradient), flux_grads[3]; atol=1e-5)
+
+    println("Conv1DOp forward and backward gradients match Flux implementation!")
+end
