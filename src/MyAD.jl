@@ -10,49 +10,63 @@ using LinearAlgebra: mul!
 # === Abstract Node Type ===
 abstract type GraphNode end
 
-# === Basic Nodes ===
+# === Constants ===
 mutable struct Constant{T} <: GraphNode
     output::T
 end
-
 Constant(x::T) where T = Constant{T}(x)
 
+# === Variables (with gradient) ===
 mutable struct Variable{T} <: GraphNode
     output::AbstractArray{T}
-    gradient::Union{Nothing,AbstractArray{T}}
+    gradient::AbstractArray{T}
 end
-Variable(data::AbstractArray{T}, grad::AbstractArray{T}) where {T} = Variable{T}(data, grad)
+Variable(data::AbstractArray{T}) where T =
+    Variable{T}(data, zeros(T, size(data)))
+
+
 
 # === Operator Nodes ===
-mutable struct ScalarOperator{F,T} <: GraphNode
+mutable struct ScalarOperator{F, T} <: GraphNode
     f::F
     inputs::Vector{GraphNode}
-    output::Union{Nothing,AbstractArray{T}}
-    gradient::Union{Nothing,AbstractArray{T}}
+    output::AbstractArray{T}
+    gradient::AbstractArray{T}
 end
 
-ScalarOperator(f::Function, args::GraphNode...) =
-    ScalarOperator{typeof(f),eltype(args[1].output)}(f, collect(args), nothing, nothing)
+function ScalarOperator(f::Function, args::GraphNode...)
+    T = Float32  # Fallback default type
+    ScalarOperator{typeof(f), T}(f, collect(args), Array{T}(undef, 0, 0), Array{T}(undef, 0, 0))
+end
+
+
 
 mutable struct MatMulOperator{T} <: GraphNode
     A::GraphNode
     B::GraphNode
-    output::Union{Nothing,AbstractMatrix{T}}
-    gradient::Union{Nothing,AbstractMatrix{T}}
+    output::Union{Nothing, AbstractMatrix{T}}
+    gradient::Union{Nothing, AbstractMatrix{T}}
 end
 
-MatMulOperator(A::GraphNode, B::GraphNode) =
-    MatMulOperator{eltype(A.output)}(A, B, nothing, nothing)
+function MatMulOperator(A::GraphNode, B::GraphNode)
+    T = eltype(A.output)
+    MatMulOperator{T}(A, B, nothing, nothing)
+end
 
-mutable struct BroadcastedOperator{F,T} <: GraphNode
+
+mutable struct BroadcastedOperator{F, T} <: GraphNode
     f::F
     input::GraphNode
-    output::Union{Nothing,AbstractArray{T}}
-    gradient::Union{Nothing,AbstractArray{T}}
+    output::AbstractArray{T}
+    gradient::AbstractArray{T}
 end
 
-BroadcastedOperator(f::Function, x::GraphNode) =
-    BroadcastedOperator{typeof(f),eltype(x.output)}(f, x, nothing, nothing)
+function BroadcastedOperator(f::Function, x::GraphNode)
+    T = eltype(x.output)
+    shape = size(x.output)
+    BroadcastedOperator{typeof(f), T}(f, x, zeros(T, shape), zeros(T, shape))
+end
+
 
 mutable struct FlattenOp{T} <: GraphNode
     x::GraphNode
@@ -68,26 +82,29 @@ end
 
 mutable struct Conv1DOp{T} <: GraphNode
     W::Variable{T}
-    b::Union{Variable{T},Nothing}
+    b::Union{Variable{T}, Nothing}
     input::GraphNode
     kernel::Int
     stride::Int
     padding::Int
     activation::Function
-    output::Union{Nothing,AbstractArray{T}}
-    gradient::Union{Nothing,AbstractArray{T}}
-    X_col::Union{Nothing,AbstractArray{T}}
-    x_padded::Union{Nothing,AbstractArray{T}}
-    W_mat::Union{Nothing,AbstractArray{T}}
-    out_mat::Union{Nothing,AbstractArray{T}}
-    dx_padded::Union{Nothing,AbstractArray{T}}
-    dX_col::Union{Nothing,AbstractArray{T}}
+    output::Union{Nothing, AbstractArray{T}}
+    gradient::Union{Nothing, AbstractArray{T}}
+    X_col::Union{Nothing, AbstractArray{T}}
+    x_padded::Union{Nothing, AbstractArray{T}}
+    W_mat::Union{Nothing, AbstractArray{T}}
+    out_mat::Union{Nothing, AbstractArray{T}}
+    dx_padded::Union{Nothing, AbstractArray{T}}
+    dX_col::Union{Nothing, AbstractArray{T}}
+    W_mat_T::Union{Nothing, AbstractArray{T}}
 end
 
-function Conv1DOp(W::Variable{T}, b::Union{Variable{T}, Nothing}, input::GraphNode, kernel::Int, stride::Int, padding::Int, activation::Function) where T
+function Conv1DOp(W::Variable{T}, b::Union{Variable{T}, Nothing}, input::GraphNode,
+                  kernel::Int, stride::Int, padding::Int, activation::Function) where T
     Conv1DOp{T}(W, b, input, kernel, stride, padding, activation,
-        nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+                nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 end
+
 
 mutable struct MaxPool1DOp{T} <: GraphNode
     x::GraphNode
@@ -99,11 +116,11 @@ mutable struct MaxPool1DOp{T} <: GraphNode
     dx::Union{Nothing, Array{T, 3}}    
 end
 
-
 function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int)
     T = eltype(x.output)
     MaxPool1DOp{T}(x, kernel_size, stride, nothing, nothing, nothing, nothing)
 end
+
 
 mutable struct PermuteDimsOp <: GraphNode
     x::GraphNode
@@ -235,56 +252,69 @@ function forward(node::FlattenOp)
 end
 
 function forward(node::Conv1DOp{T}) where {T}
-    x = node.input.output             # shape (L, C, B)
-    W = node.W.output                 # shape (K, C, O)
-    b = node.b.output                 # shape (O, 1) или (O,)
-    
+    x = node.input.output
+    W = node.W.output
+    b = node.b === nothing ? nothing : node.b.output
+
     K, C, O = size(W)
     L, _, B = size(x)
-    P = node.padding
-    S = node.stride
+    P, S = node.padding, node.stride
+    L_padded = L + 2P
+    L_out = (L_padded - K) ÷ S + 1
 
-    # === Padding ===
-    x_padded = P > 0 ? cat(zeros(T, P, C, B), x, zeros(T, P, C, B); dims=1) : x
-    node.x_padded = x_padded
+    # === Allocate or reuse padded input ===
+    if node.x_padded === nothing || size(node.x_padded) != (L_padded, C, B)
+        node.x_padded = zeros(T, L_padded, C, B)
+    else
+        fill!(node.x_padded, 0)
+    end
+    @views node.x_padded[P+1:P+L, :, :] .= x
+    x_padded = node.x_padded
 
-    L_p = size(x_padded, 1)
-    L_out = (L_p - K) ÷ S + 1
+    # === im2col transform ===
+    if node.X_col === nothing || size(node.X_col) != (K * C, L_out * B)
+        node.X_col = zeros(T, K * C, L_out * B)
+    end
+    X_col = node.X_col
 
-    # === im2col ===
-    X_col = zeros(T, K * C, L_out * B)
     col = 1
-    for b in 1:B
+    @inbounds for b in 1:B
         for l in 0:L_out-1
-            patch = view(x_padded, l*S+1:l*S+K, :, b)
-            X_col[:, col] .= vec(patch)
+            patch = @view x_padded[l*S+1:l*S+K, :, b]
+            @views X_col[:, col] .= vec(patch)
             col += 1
         end
     end
-    node.X_col = X_col
 
-    # === Flip kernel along K ===
-    W_flipped = W[K:-1:1, :, :]               # still (K, C, O)
-    W_mat = reshape(W_flipped, K * C, O)
-    node.W_mat = W_mat
+    # === Flip and reshape kernel ===
+    W_flipped = @view W[K:-1:1, :, :]
+    if node.W_mat === nothing || size(node.W_mat) != (K*C, O)
+        node.W_mat = reshape(copy(W_flipped), K*C, O)
+        node.W_mat_T = transpose(node.W_mat)
+    else
+        reshape!(node.W_mat, copy(W_flipped), K*C, O)
+        node.W_mat_T = transpose(node.W_mat)
+    end
+    W_mat_T = node.W_mat_T  # (O, K*C)
 
-    # === Convolution as matrix product ===
-    out_mat = W_mat' * X_col                  # (O, L_out * B)
+    # === Matrix multiplication ===
+    if node.out_mat === nothing || size(node.out_mat) != (O, L_out * B)
+        node.out_mat = similar(W_mat_T, O, L_out * B)
+    end
+    out_mat = node.out_mat
 
-    # === Bias addition with safety check ===
-    @assert size(b, 1) == O "Bias length must match number of output channels (O)"
-    out_mat .+= reshape(b, O, 1)              # ensures broadcasting works
+    mul!(out_mat, W_mat_T, X_col)  # O × (K*C) × (K*C × L_out*B)
 
-    node.out_mat = out_mat
+    # === Bias addition
+    if b !== nothing
+        @inbounds @views out_mat .+= reshape(b, O, 1)
+    end
 
-    # === Reshape output to (L_out, O, B)
+    # === Reshape and activate ===
     out = reshape(out_mat, O, L_out, B)
-    out = permutedims(out, (2, 1, 3))         # (O, L_out, B) → (L_out, O, B)
-
-    # === Apply activation
+    out = permutedims(out, (2, 1, 3))  # (L_out, O, B)
     node.output = node.activation === identity_fn ? out : node.activation.(out)
 end
-
 
 
 function forward(node::MaxPool1DOp)
@@ -330,17 +360,17 @@ function forward(node::GraphNode)
     error("No forward method defined for type $(typeof(node))")
 end
 
-# === Backward Pass ===
 function accumulate_grad!(x::GraphNode, dx)
-    if isnothing(x.gradient)
-        x.gradient = similar(dx)
-        x.gradient .= dx
+    g = x.gradient
+    if g === nothing || isempty(g)
+        x.gradient = copy(dx)
     else
-        @inbounds @simd for i in eachindex(x.gradient)
-            x.gradient[i] += dx[i]
+        @inbounds @simd for i in eachindex(g)
+            g[i] += dx[i]
         end
     end
 end
+
 
 function backward!(nodes::Vector{GraphNode}, seed=1.0)
     last(nodes).gradient = seed
@@ -395,21 +425,36 @@ function backward(node::MatMulOperator)
 end
 
 function backward(node::BroadcastedOperator)
-    f, x, out_grad = node.f, node.input, node.gradient
-    δ = if f == relu
-        out_grad .* (x.output .>= 0)
-    elseif f == identity_fn
-        out_grad
-    elseif f == sigmoid
+    f = node.f
+    x = node.input
+    out_grad = node.gradient
+    δ = similar(out_grad)
+
+    if f === relu
+        @inbounds @simd for i in eachindex(δ)
+            δ[i] = x.output[i] ≥ 0 ? out_grad[i] : zero(eltype(out_grad))
+        end
+    elseif f === identity_fn
+        @inbounds @simd for i in eachindex(δ)
+            δ[i] = out_grad[i]
+        end
+    elseif f === sigmoid
         σ = node.output
-        out_grad .* σ .* (1 .- σ)
-    elseif f == tanh
-        out_grad .* (1 .- node.output .^ 2)
+        @inbounds @simd for i in eachindex(δ)
+            δ[i] = out_grad[i] * σ[i] * (1 - σ[i])
+        end
+    elseif f === tanh
+        σ = node.output
+        @inbounds @simd for i in eachindex(δ)
+            δ[i] = out_grad[i] * (1 - σ[i]^2)
+        end
     else
         error("Unsupported broadcasted function $f")
     end
+
     accumulate_grad!(x, δ)
 end
+
 
 function backward(node::Constant) end
 function backward(node::Variable) end
@@ -420,52 +465,67 @@ function backward(node::FlattenOp)
 end
 
 function backward(node::Conv1DOp{T}) where {T}
-    δ = node.gradient                          # shape (L_out, O, B)
+    δ = node.gradient
     K, C, O = size(node.W.output)
     _, _, B = size(node.input.output)
     S, P = node.stride, node.padding
     L_out = size(δ, 1)
 
     # === Activation backward
-    if node.activation == relu
+    if node.activation === relu
         δ = δ .* (node.output .> 0)
-    elseif node.activation == sigmoid
+    elseif node.activation === sigmoid
         σ = node.output
         δ = δ .* σ .* (1 .- σ)
     end
 
     # === Reshape δ to (O, L_out * B)
-    dout_mat = permutedims(δ, (2, 1, 3))
-    dout_mat = reshape(dout_mat, O, :)
+    dout_mat = reshape(permutedims(δ, (2, 1, 3)), O, :)
 
     # === Gradient w.r.t. weights
-    dW_mat = node.X_col * dout_mat'                   # (K⋅C, O)
-    dW_flipped = reshape(dW_mat, K, C, O)             # (K, C, O)
-    dW = dW_flipped[K:-1:1, :, :]                     # flip back to match W
+    dW_mat = node.X_col * dout_mat'
+    dW = reshape(dW_mat, K, C, O)[K:-1:1, :, :]
     accumulate_grad!(node.W, dW)
 
-    # === Gradient w.r.t. bias
-    db = sum(dout_mat, dims=2)
-    accumulate_grad!(node.b, reshape(db, size(node.b.output)))
+    # === Bias grad
+    if node.b !== nothing
+        db = sum(dout_mat, dims=2)
+        accumulate_grad!(node.b, reshape(db, size(node.b.output)))
+    end
 
-    # === Gradient w.r.t. input
-    dX_col = node.W_mat * dout_mat                    # (K*C, L_out * B)
-    dx_pad = zeros(T, size(node.x_padded))
+    # === dX_col
+    dX_col = node.dX_col
+    if dX_col === nothing || size(dX_col) != (K*C, L_out*B)
+        dX_col = node.dX_col = similar(node.X_col)
+    end
+    mul!(dX_col, node.W_mat, dout_mat)
+
+    # === dx_padded
+    dx_pad = node.dx_padded
+    x_pad_shape = size(node.x_padded)
+    if dx_pad === nothing || size(dx_pad) != x_pad_shape
+        dx_pad = node.dx_padded = zeros(T, x_pad_shape)
+    else
+        fill!(dx_pad, 0)
+    end
+
     col = 1
-    for b in 1:B
+    @inbounds @simd for b in 1:B
         for l in 0:L_out-1
-            patch = view(dx_pad, l*S+1:l*S+K, :, b)
-            patch .+= reshape(dX_col[:, col], K, C)
+            patch = @view dx_pad[l*S+1:l*S+K, :, b]
+            @views patch .+= reshape(dX_col[:, col], K, C)
             col += 1
         end
     end
 
     # === Unpad
-    L_p = size(dx_pad, 1)
-    dx = P > 0 ? view(dx_pad, P+1:L_p-P, :, :) : dx_pad
+    if P > 0
+        dx = @view dx_pad[P+1:P+size(node.input.output, 1)+P, :, :]
+    else
+        dx = dx_pad
+    end
     accumulate_grad!(node.input, dx)
 end
-
 
 function backward(node::MaxPool1DOp)
     @inbounds begin
