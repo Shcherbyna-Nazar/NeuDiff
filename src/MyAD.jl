@@ -14,138 +14,140 @@ abstract type GraphNode end
 mutable struct Constant{T} <: GraphNode
     output::T
 end
-Constant(x::T) where T = Constant{T}(x)
+Constant(x::T) where {T} = Constant{T}(x)
 
 # === Variables (with gradient) ===
-mutable struct Variable{T} <: GraphNode
-    output::AbstractArray{T}
-    gradient::AbstractArray{T}
+mutable struct Variable{T, N} <: GraphNode
+    output::Array{T, N}
+    gradient::Array{T, N}
 end
-Variable(data::AbstractArray{T}) where T =
-    Variable{T}(data, zeros(T, size(data)))
-
-
+Variable(data::Array{T, N}) where {T, N} = Variable{T, N}(data, zeros(T, size(data)))
 
 # === Operator Nodes ===
-mutable struct ScalarOperator{F, T} <: GraphNode
+mutable struct ScalarOperator{F, T, N} <: GraphNode
     f::F
-    inputs::Vector{GraphNode}
-    output::AbstractArray{T}
-    gradient::AbstractArray{T}
+    inputs::NTuple{2, GraphNode}
+    output::Array{T, N}
+    gradient::Array{T, N}
 end
 
-function ScalarOperator(f::Function, args::GraphNode...)
-    T = Float32  # Fallback default type
-    ScalarOperator{typeof(f), T}(f, collect(args), Array{T}(undef, 0, 0), Array{T}(undef, 0, 0))
+function ScalarOperator(f::F, a::GraphNode, b::GraphNode) where {F}
+    T = promote_type(eltype(a.output), eltype(b.output))
+    N = max(ndims(a.output), ndims(b.output))
+    ScalarOperator{F, T, N}(f, (a, b), Array{T}(undef, 0, 0), Array{T}(undef, 0, 0))
 end
 
-
-
-mutable struct MatMulOperator{T} <: GraphNode
+mutable struct MatMulOperator{T, NA, NB} <: GraphNode
     A::GraphNode
     B::GraphNode
-    output::Union{Nothing, AbstractMatrix{T}}
-    gradient::Union{Nothing, AbstractMatrix{T}}
+    output::Array{T, 2}
+    gradient::Array{T, 2}
 end
 
 function MatMulOperator(A::GraphNode, B::GraphNode)
-    T = eltype(A.output)
-    MatMulOperator{T}(A, B, nothing, nothing)
+    T = promote_type(eltype(A.output), eltype(B.output))
+    MatMulOperator{T, ndims(A.output), ndims(B.output)}(A, B, Array{T}(undef, 0, 0), Array{T}(undef, 0, 0))
 end
 
-
-mutable struct BroadcastedOperator{F, T} <: GraphNode
+mutable struct BroadcastedOperator{F, T, N} <: GraphNode
     f::F
     input::GraphNode
-    output::AbstractArray{T}
-    gradient::AbstractArray{T}
+    output::Array{T, N}
+    gradient::Array{T, N}
 end
 
-function BroadcastedOperator(f::Function, x::GraphNode)
+function BroadcastedOperator(f::F, x::GraphNode) where {F}
     T = eltype(x.output)
     shape = size(x.output)
-    BroadcastedOperator{typeof(f), T}(f, x, zeros(T, shape), zeros(T, shape))
+    BroadcastedOperator{F, T, length(shape)}(f, x, zeros(T, shape), zeros(T, shape))
 end
 
-
-mutable struct FlattenOp{T} <: GraphNode
+mutable struct FlattenOp{T, N, NO} <: GraphNode
     x::GraphNode
-    orig_shape::Tuple
-    output::Union{Nothing, AbstractArray{T}}
-    gradient::Union{Nothing, AbstractArray{T}}
+    orig_shape::NTuple{N, Int}
+    output::Array{T, NO}
+    gradient::Array{T, NO}
 end
 
 function flatten_last_two_dims(x::GraphNode)
     T = eltype(x.output)
-    FlattenOp{T}(x, (), nothing, nothing)
+    orig_shape = size(x.output)
+    out_shape = (:, size(x.output, ndims(x.output)))
+    FlattenOp{T, length(orig_shape), 2}(x, orig_shape, Array{T}(undef, 0, 0), Array{T}(undef, 0, 0))
 end
 
-mutable struct Conv1DOp{T} <: GraphNode
-    W::Variable{T}
-    b::Union{Variable{T}, Nothing}
+mutable struct Conv1DOp{T, F, NW, NB, NI} <: GraphNode
+    W::Variable{T, NW}
+    b::Union{Variable{T, NB}, Nothing}
     input::GraphNode
     kernel::Int
     stride::Int
     padding::Int
-    activation::Function
-    output::Union{Nothing, AbstractArray{T}}
-    gradient::Union{Nothing, AbstractArray{T}}
-    X_col::Union{Nothing, AbstractArray{T}}
-    x_padded::Union{Nothing, AbstractArray{T}}
-    W_mat::Union{Nothing, AbstractArray{T}}
-    out_mat::Union{Nothing, AbstractArray{T}}
-    dx_padded::Union{Nothing, AbstractArray{T}}
-    dX_col::Union{Nothing, AbstractArray{T}}
-    W_mat_T::Union{Nothing, AbstractArray{T}}
+    activation::F
+    output::Array{T, 3}
+    gradient::Array{T, 3}
+    X_col::Array{T, 2}
+    x_padded::Array{T, 3}
+    W_mat::Array{T, 2}
+    out_mat::Array{T, 2}
+    dx_padded::Array{T, 3}
+    dX_col::Array{T, 2}
+    W_mat_T::Array{T, 2}
 end
 
-function Conv1DOp(W::Variable{T}, b::Union{Variable{T}, Nothing}, input::GraphNode,
-                  kernel::Int, stride::Int, padding::Int, activation::Function) where T
-    Conv1DOp{T}(W, b, input, kernel, stride, padding, activation,
-                nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+function Conv1DOp(W::Variable{T, NW}, b::Union{Variable{T, NB}, Nothing}, input::GraphNode,
+                  kernel::Int, stride::Int, padding::Int, activation::F) where {T, NW, NB, F}
+    Conv1DOp{T, F, NW, NB, ndims(input.output)}(
+        W, b, input, kernel, stride, padding, activation,
+        Array{T, 3}(undef, 0, 0, 0), Array{T, 3}(undef, 0, 0, 0),
+        Array{T, 2}(undef, 0, 0), Array{T, 3}(undef, 0, 0, 0),
+        Array{T, 2}(undef, 0, 0), Array{T, 2}(undef, 0, 0),
+        Array{T, 3}(undef, 0, 0, 0), Array{T, 2}(undef, 0, 0),
+        Array{T, 2}(undef, 0, 0)
+    )
 end
-
 
 mutable struct MaxPool1DOp{T} <: GraphNode
     x::GraphNode
     kernel_size::Int
     stride::Int
-    output::Union{Nothing, Array{T, 3}}   
-    gradient::Union{Nothing, Array{T, 3}} 
-    indices::Union{Nothing, Array{Int}}   
-    dx::Union{Nothing, Array{T, 3}}    
+    output::Array{T, 3}
+    gradient::Array{T, 3}
+    indices::Array{Int, 3}
+    dx::Array{T, 3}
 end
 
 function MaxPool1DOp(x::GraphNode, kernel_size::Int, stride::Int)
     T = eltype(x.output)
-    MaxPool1DOp{T}(x, kernel_size, stride, nothing, nothing, nothing, nothing)
+    MaxPool1DOp{T}(x, kernel_size, stride,
+        Array{T, 3}(undef, 0, 0, 0), Array{T, 3}(undef, 0, 0, 0),
+        Array{Int, 3}(undef, 0, 0, 0), Array{T, 3}(undef, 0, 0, 0))
 end
 
-
-mutable struct PermuteDimsOp <: GraphNode
+mutable struct PermuteDimsOp{T, N} <: GraphNode
     x::GraphNode
-    dims::NTuple{3, Int}
-    output::Union{Nothing, AbstractArray}
-    gradient::Union{Nothing, AbstractArray}
+    dims::NTuple{N, Int}
+    output::Array{T, N}
+    gradient::Array{T, N}
 end
 
-function PermuteDimsOp(x::GraphNode, dims::NTuple{3, Int})
-    PermuteDimsOp(x, dims, nothing, nothing)
+function PermuteDimsOp(x::GraphNode, dims::NTuple{N, Int}) where {N}
+    T = eltype(x.output)
+    PermuteDimsOp{T, N}(x, dims, Array{T, N}(undef, 0, 0, 0), Array{T, N}(undef, 0, 0, 0))
 end
 
-
-
-mutable struct EmbeddingOp{T} <: GraphNode
-    weight::Variable{T}
+mutable struct EmbeddingOp{T, N} <: GraphNode
+    weight::Variable{T, 2}
     indices::Vector{Int}
-    shape::Tuple
-    output::Union{Nothing,AbstractArray{T}}
-    gradient::Union{Nothing,AbstractArray{T}}
+    shape::NTuple{N, Int}
+    output::Array{T, N}
+    gradient::Array{T, N}
 end
 
-function EmbeddingOp(weight::Variable{T}, indices::Vector{Int}, shape::Tuple) where {T}
-    EmbeddingOp{T}(weight, indices, shape, nothing, nothing)
+function EmbeddingOp(weight::Variable{T, 2}, indices::Vector{Int}, shape::NTuple{N, Int}) where {T, N}
+    EmbeddingOp{T, N}(weight, indices, shape, Array{T, N}(undef, shape...), Array{T, N}(undef, shape...))
 end
+
 
 # === Activation Functions ===
 relu(x) = max.(zero(eltype(x)), x)
