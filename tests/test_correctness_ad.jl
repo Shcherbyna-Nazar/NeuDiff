@@ -4,17 +4,15 @@ include("../src/MyAD.jl")
 using .MyAD
 using Zygote
 using Flux
-using .MyAD: relu, sigmoid, identity_fn, tanh, flatten_last_two_dims
+using .MyAD: relu, sigmoid, identity_fn, tanh, flatten_last_two_dims, zero_grad!
 
 @testset "Scalar addition (a + b)" begin
     a_val, b_val = 3.0f0, 2.0f0
 
-    # Zygote ground truth
     f_zyg(a, b) = a + b
     y_zyg, back_zyg = Zygote.pullback(f_zyg, a_val, b_val)
     grad_zyg = back_zyg(1.0)
 
-    # MyAD
     a = Variable([a_val], [0.0f0])
     b = Variable([b_val], [0.0f0])
     out = a + b
@@ -31,12 +29,10 @@ end
 @testset "Scalar multiplication (a * b)" begin
     a_val, b_val = 3.0f0, 2.0f0
 
-    # Zygote ground truth
     f_zyg(a, b) = a * b
     y_zyg, back_zyg = Zygote.pullback(f_zyg, a_val, b_val)
     grad_zyg = back_zyg(1.0)
 
-    # MyAD
     a = Variable([a_val], [0.0f0])
     b = Variable([b_val], [0.0f0])
     out = a * b
@@ -53,12 +49,10 @@ end
 @testset "Scalar division (a / b)" begin
     a_val, b_val = 6.0f0, 2.0f0
 
-    # Zygote ground truth
     f_zyg(a, b) = a / b
     y_zyg, back_zyg = Zygote.pullback(f_zyg, a_val, b_val)
     grad_zyg = back_zyg(1.0)
 
-    # MyAD
     a = Variable([a_val], [0.0f0])
     b = Variable([b_val], [0.0f0])
     out = a / b
@@ -96,12 +90,10 @@ end
     A_val = randn(Float32, 2, 3)
     B_val = randn(Float32, 3, 1)
 
-    # Zygote ground truth
     f_zyg(A, B) = A * B
     y_zyg, back_zyg = Zygote.pullback(f_zyg, A_val, B_val)
     grad_zyg = back_zyg(ones(Float32, 2, 1))
 
-    # MyAD
     A = Variable(A_val, zeros(Float32, size(A_val)))
     B = Variable(B_val, zeros(Float32, size(B_val)))
     out = MatMulOperator(A, B)
@@ -214,13 +206,12 @@ end
 end
 
 @testset "Flatten last two dims operation with batch" begin
-    x_val = reshape(Float32.(1:24), (2, 3, 4))  # shape: (L=2, C=3, B=4)
+    x_val = reshape(Float32.(1:24), (2, 3, 4))
 
-    f_zyg(x) = reshape(x, :, size(x, ndims(x)))  # shape: (6, 4)
+    f_zyg(x) = reshape(x, :, size(x, ndims(x)))
     y_zyg, back_zyg = Zygote.pullback(f_zyg, x_val)
     grad_zyg = back_zyg(ones(Float32, 6, 4))
 
-    # MyAD
     x = Variable(x_val, zeros(Float32, size(x_val)))
     z = flatten_last_two_dims(x)
 
@@ -237,12 +228,10 @@ end
 @testset "Expression a * b + c" begin
     a_val, b_val, c_val = 2.0f0, 3.0f0, 5.0f0
 
-    # Zygote reference
     f_zyg(a, b, c) = a * b + c
     y_zyg, back_zyg = Zygote.pullback(f_zyg, a_val, b_val, c_val)
     grad_zyg = back_zyg(1.0f0)
 
-    # MyAD graph
     a = Variable([a_val], [0.0f0])
     b = Variable([b_val], [0.0f0])
     c = Variable([c_val], [0.0f0])
@@ -262,12 +251,10 @@ end
 @testset "Scalar exponentiation (a ^ b)" begin
     a_val, b_val = 3.0f0, 2.0f0
 
-    # Zygote ground truth
     f_zyg(a, b) = a ^ b
     y_zyg, back_zyg = Zygote.pullback(f_zyg, a_val, b_val)
     grad_zyg = back_zyg(1.0)
 
-    # MyAD
     a = Variable([a_val], [0.0f0])
     b = Variable([b_val], [0.0f0])
     out = a ^ b
@@ -284,12 +271,10 @@ end
 @testset "Scalar Expression a^2 + b" begin
     a_val, b_val = 3.0f0, 2.0f0
 
-    # Zygote ground truth
     f_zyg(a, b) = a^2 + b
     y_zyg, back_zyg = Zygote.pullback(f_zyg, a_val, b_val)
     grad_zyg = back_zyg(1.0)
 
-    # MyAD
     a = Variable([a_val], [0.0f0])
     b = Variable([b_val], [0.0f0])
     out = a^2 + b
@@ -306,12 +291,10 @@ end
 @testset "Scalar Expression a^2 + b^2" begin
     a_val, b_val = 3.0f0, 2.0f0
 
-    # Zygote ground truth
     f_zyg(a, b) = a^2 + b^2
     y_zyg, back_zyg = Zygote.pullback(f_zyg, a_val, b_val)
     grad_zyg = back_zyg(1.0)
 
-    # MyAD
     a = Variable([a_val], [0.0f0])
     b = Variable([b_val], [0.0f0])
     out = a^2 + b^2
@@ -326,22 +309,18 @@ end
 end
 
 @testset "MaxPool1D operation compared with Flux/Zygote" begin
-    x_val = reshape(Float32.(1:12), (6, 2, 1))  # L=6, C=2, B=1
+    x_val = reshape(Float32.(1:12), (6, 2, 1))
     x = Variable(x_val, zeros(Float32, size(x_val)))
     pool = MaxPool1DOp(x, 2, 2)
 
-    # MyAD forward
     graph = topological_sort(pool)
     forward!(graph)
 
-    # Flux forward
     flux_out = maxpool(x_val, (2,), stride=(2,))
     @test isapprox(pool.output, flux_out; atol=1e-6)
 
-    # MyAD backward
     backward!(graph, ones(Float32, size(pool.output)))
 
-    # Zygote gradient
     f_zyg(x) = maxpool(x, (2,), stride=(2,))
     _, back_zyg = Zygote.pullback(f_zyg, x_val)
     grad_zyg = back_zyg(ones(Float32, size(flux_out)))[1]
@@ -352,16 +331,14 @@ end
 @testset "EmbeddingOp forward and backward" begin
     vocab_size = 10
     embedding_dim = 4
-    sequence = [2 5 3; 1 4 2]  # (2, 3) -> sequence_length=2, batch_size=3
+    sequence = [2 5 3; 1 4 2]
 
-    # Flux/Zygote ground truth
     weights = randn(Float32, embedding_dim, vocab_size)
     f_zyg(w) = reshape(w[:, vec(sequence)], (embedding_dim, size(sequence, 1), size(sequence, 2)))
     y_zyg, back_zyg = Zygote.pullback(f_zyg, weights)
     dy = ones(Float32, size(y_zyg))
     grad_zyg = back_zyg(dy)[1]
 
-    # MyAD
     W = Variable(copy(weights), zeros(Float32, size(weights)))
     embed = MyAD.EmbeddingOp(W, vec(sequence), (embedding_dim, size(sequence)...))
 
@@ -376,12 +353,10 @@ end
 @testset "PermuteDimsOp forward and backward" begin
     x_val = rand(Float32, 2, 3, 4)
 
-    # Zygote reference
     f_zyg(x) = permutedims(x, (3, 1, 2))
     y_zyg, back_zyg = Zygote.pullback(f_zyg, x_val)
     grad_zyg = back_zyg(ones(Float32, size(f_zyg(x_val))))[1]
 
-    # MyAD
     x = Variable(x_val, zeros(Float32, size(x_val)))
     z = PermuteDimsOp(x, (3, 1, 2))
     graph = topological_sort(z)
@@ -396,22 +371,20 @@ end
 @testset "Embedding -> Flatten -> Dense" begin
     vocab_size = 5
     embedding_dim = 3
-    sequence = [1 2; 3 4]  # shape: (2, 2) sequence_length=2, batch_size=2
+    sequence = [1 2; 3 4]
 
     weights = randn(Float32, embedding_dim, vocab_size)
     dense_W = randn(Float32, 4, embedding_dim * size(sequence, 1))
     dense_b = randn(Float32, 4, 1)
 
-    # Zygote reference
     f_zyg(w_embed, w_dense, b_dense) = begin
         emb = reshape(w_embed[:, vec(sequence)], (embedding_dim, size(sequence)...))
-        flat = reshape(emb, :, size(sequence, 2))  # flatten (E, L, B) -> (E*L, B)
+        flat = reshape(emb, :, size(sequence, 2))
         sigmoid.(w_dense * flat .+ b_dense)
     end
     y_zyg, back_zyg = Zygote.pullback(f_zyg, weights, dense_W, dense_b)
     grad_zyg = back_zyg(ones(Float32, 4, size(sequence, 2)))
 
-    # MyAD
     embed = Variable(copy(weights), zeros(Float32, size(weights)))
     denseW = Variable(copy(dense_W), zeros(Float32, size(dense_W)))
     denseB = Variable(copy(dense_b), zeros(Float32, size(dense_b)))
@@ -424,6 +397,7 @@ end
     forward!(graph)
     @test isapprox(out.output, y_zyg; atol=1e-5)
 
+    zero_grad!(out)
     backward!(graph, ones(Float32, size(out.output)))
     @test isapprox(embed.gradient, grad_zyg[1]; atol=1e-5)
     @test isapprox(denseW.gradient, grad_zyg[2]; atol=1e-5)
@@ -438,14 +412,12 @@ end
     W = rand(Float32, K, C, O)
     b = rand(Float32, O)
 
-    # Flux Conv1D reference (initialize once)
     flux_conv = Flux.Conv((K,), C => O, identity; stride=1, pad=0)
     flux_conv.weight .= W
     flux_conv.bias .= b
 
     flux_output = flux_conv(x)
 
-    # MyAD forward pass
     x_var = Variable(x, zeros(Float32, size(x)))
     W_var = Variable(W, zeros(Float32, size(W)))
     b_var = Variable(reshape(b, O, 1), zeros(Float32, O, 1))
@@ -457,11 +429,9 @@ end
 
     @test isapprox(myad_output, flux_output; atol=1e-5)
 
-    # Flux backward pass
     flux_loss(x, W, b) = sum(Flux.Conv((K,), C => O, identity; stride=1, pad=0, init=(o,i,kwargs...)->W, bias=b)(x))
     flux_grads = Zygote.gradient(flux_loss, x, W, b)
 
-    # MyAD backward pass
     backward!(nodes, ones(Float32, size(myad_output)))
 
     @test isapprox(x_var.gradient, flux_grads[1]; atol=1e-5)

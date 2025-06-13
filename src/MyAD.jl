@@ -22,6 +22,11 @@ mutable struct Variable{T, N} <: GraphNode
     gradient::Array{T, N}
 end
 Variable(data::Array{T, N}) where {T, N} = Variable{T, N}(data, zeros(T, size(data)))
+Variable(data::AbstractArray{T, N}) where {T, N} =
+    Variable{T, N}(Array(data), zeros(T, size(data)))
+Variable(data::AbstractArray{T, N}, grad::AbstractArray{T, N}) where {T, N} =
+    Variable{T, N}(Array(data), Array(grad))
+
 
 # === Operator Nodes ===
 mutable struct ScalarOperator{F, T, N} <: GraphNode
@@ -34,8 +39,12 @@ end
 function ScalarOperator(f::F, a::GraphNode, b::GraphNode) where {F}
     T = promote_type(eltype(a.output), eltype(b.output))
     N = max(ndims(a.output), ndims(b.output))
-    ScalarOperator{F, T, N}(f, (a, b), Array{T}(undef, 0, 0), Array{T}(undef, 0, 0))
+    # Always allocate an empty array of N dimensions:
+    empty_shape = ntuple(_ -> 0, N)
+    ScalarOperator{F, T, N}(f, (a, b), Array{T}(undef, empty_shape...), Array{T}(undef, empty_shape...))
 end
+
+
 
 mutable struct MatMulOperator{T, NA, NB} <: GraphNode
     A::GraphNode
@@ -155,13 +164,12 @@ sigmoid(x) = one(eltype(x)) ./ (one(eltype(x)) .+ exp.(-x))
 identity_fn(x) = x
 
 # === Operator Overloading ===
-import Base: +, *, -, /, sin, ^
+import Base: +, *, -, /, ^
 
 Base.:+(a::GraphNode, b::GraphNode) = ScalarOperator(+, a, b)
 Base.:*(a::GraphNode, b::GraphNode) = ScalarOperator(*, a, b)
 Base.:-(a::GraphNode, b::GraphNode) = ScalarOperator(-, a, b)
 Base.:/(a::GraphNode, b::GraphNode) = ScalarOperator(/, a, b)
-Base.sin(x::GraphNode) = ScalarOperator(sin, x)
 Base.:^(a::GraphNode, b::GraphNode) = ScalarOperator(^, a, b)
 Base.:^(a::GraphNode, b::Number) = ScalarOperator(^, a, Constant(b))
 
@@ -234,15 +242,26 @@ end
 
 function forward(node::ScalarOperator)
     inputs = map(n -> n.output, node.inputs)
-    node.output = node.f.(inputs...)
+    if node.output === nothing || size(node.output) != size(inputs[1])
+        node.output = similar(inputs[1])
+    end
+    broadcast!(node.f, node.output, inputs[1], inputs[2])
 end
 
 function forward(node::MatMulOperator)
-    node.output = node.A.output * node.B.output
+    A, B = node.A.output, node.B.output
+    if node.output === nothing || size(node.output) != (size(A,1), size(B,2))
+        node.output = similar(A, size(A,1), size(B,2))
+    end
+    mul!(node.output, A, B)
 end
 
 function forward(node::BroadcastedOperator)
-    node.output = node.f.(node.input.output)
+    x = node.input.output
+    if node.output === nothing || size(node.output) != size(x)
+        node.output = similar(x)
+    end
+    broadcast!(node.f, node.output, x)
 end
 
 function forward(node::Constant) end
@@ -250,7 +269,12 @@ function forward(node::Variable) end
 
 function forward(node::FlattenOp)
     node.orig_shape = size(node.x.output)
-    node.output = reshape(node.x.output, :, size(node.x.output, ndims(node.x.output)))
+    out_shape = (:, size(node.x.output, ndims(node.x.output)))
+    if node.output === nothing || size(node.output) != (prod(node.orig_shape[1:end-1]), node.orig_shape[end])
+        node.output = reshape(node.x.output, prod(node.orig_shape[1:end-1]), node.orig_shape[end])
+    else
+        reshape!(node.output, node.x.output, prod(node.orig_shape[1:end-1]), node.orig_shape[end])
+    end
 end
 
 function forward(node::Conv1DOp{T}) where {T}
@@ -404,9 +428,6 @@ function backward(node::ScalarOperator)
         a, b = inputs
         accumulate_grad!(a, out_grad ./ b.output)
         accumulate_grad!(b, -out_grad .* a.output ./ (b.output .^ 2))
-    elseif f == sin
-        x = inputs[1]
-        accumulate_grad!(x, out_grad .* cos.(x.output))
     elseif f == ^
         x, y = inputs
         if y isa Constant
@@ -422,39 +443,49 @@ end
 
 function backward(node::MatMulOperator)
     A, B, out_grad = node.A, node.B, node.gradient
-    accumulate_grad!(A, out_grad * B.output')
-    accumulate_grad!(B, A.output' * out_grad)
+    if A.gradient === nothing || size(A.gradient) != size(A.output)
+        A.gradient = similar(A.output)
+        fill!(A.gradient, 0)
+    end
+    if B.gradient === nothing || size(B.gradient) != size(B.output)
+        B.gradient = similar(B.output)
+        fill!(B.gradient, 0)
+    end
+    mul!(A.gradient, out_grad, B.output', 1.0, 1.0)
+    mul!(B.gradient, A.output', out_grad, 1.0, 1.0)
 end
 
 function backward(node::BroadcastedOperator)
     f = node.f
     x = node.input
     out_grad = node.gradient
-    δ = similar(out_grad)
+    δ = x.gradient
+    if δ === nothing || size(δ) != size(out_grad)
+        δ = x.gradient = similar(out_grad)
+        fill!(δ, 0)
+    end
 
     if f === relu
         @inbounds @simd for i in eachindex(δ)
-            δ[i] = x.output[i] ≥ 0 ? out_grad[i] : zero(eltype(out_grad))
+            δ[i] += x.output[i] ≥ 0 ? out_grad[i] : zero(eltype(out_grad))
         end
     elseif f === identity_fn
         @inbounds @simd for i in eachindex(δ)
-            δ[i] = out_grad[i]
+            δ[i] += out_grad[i]
         end
     elseif f === sigmoid
         σ = node.output
         @inbounds @simd for i in eachindex(δ)
-            δ[i] = out_grad[i] * σ[i] * (1 - σ[i])
+            δ[i] += out_grad[i] * σ[i] * (1 - σ[i])
         end
     elseif f === tanh
         σ = node.output
         @inbounds @simd for i in eachindex(δ)
-            δ[i] = out_grad[i] * (1 - σ[i]^2)
+            δ[i] += out_grad[i] * (1 - σ[i]^2)
         end
     else
         error("Unsupported broadcasted function $f")
     end
-
-    accumulate_grad!(x, δ)
 end
 
 
@@ -560,17 +591,31 @@ function backward(node::EmbeddingOp)
     dE = node.gradient
     dE_mat = reshape(dE, size(dE, 1), :)
     acc = Dict{Int, Vector{eltype(dE_mat)}}()
+    used = Set(node.indices)
+    for idx in used
+        fill!(node.weight.gradient[:, idx], 0)
+    end
     for (i, idx) in enumerate(node.indices)
         acc[idx] = get!(acc, idx, zeros(eltype(dE_mat), size(dE_mat, 1)))
-        @inbounds @views acc[idx] .+= dE_mat[:, i]
+        acc[idx] .+= dE_mat[:, i]
     end
     for (idx, val) in acc
-        @inbounds @views node.weight.gradient[:, idx] .+= val
+        node.weight.gradient[:, idx] .+= val
     end
 end
+
 
 function backward(node::GraphNode)
     error("No backward method defined for type $(typeof(node))")
 end
+
+function zero_grad!(root::GraphNode)
+    for node in topological_sort(root)
+        if node isa Variable
+            fill!(node.gradient, 0)
+        end
+    end
+end
+
 
 end  # module
