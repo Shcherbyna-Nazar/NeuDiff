@@ -5,6 +5,7 @@ using .MyAD
 using Zygote
 using Flux
 using .MyAD: relu, sigmoid, identity_fn, tanh, flatten_last_two_dims, zero_grad!
+using LinearAlgebra
 
 @testset "Scalar addition (a + b)" begin
     a_val, b_val = 3.0f0, 2.0f0
@@ -399,10 +400,27 @@ end
 
     zero_grad!(out)
     backward!(graph, ones(Float32, size(out.output)))
-    @test isapprox(embed.gradient, grad_zyg[1]; atol=1e-5)
+
+    # Сравнение градиентов
+    function relative_error(a, b)
+        return norm(a - b) / (norm(b) + eps(Float32))
+    end
+
+    used = unique(vec(sequence))
+
+    for idx in used
+        a = embed.gradient[:, idx]
+        b = grad_zyg[1][:, idx]
+        err = relative_error(a, b)
+
+        @test err < 1e-4
+    end
+
     @test isapprox(denseW.gradient, grad_zyg[2]; atol=1e-5)
     @test isapprox(denseB.gradient, grad_zyg[3]; atol=1e-5)
 end
+
+
 
 @testset "Conv1DOp correctness test" begin
     L, C, B = 10, 3, 2

@@ -590,17 +590,17 @@ end
 function backward(node::EmbeddingOp)
     dE = node.gradient
     dE_mat = reshape(dE, size(dE, 1), :)
-    acc = Dict{Int, Vector{eltype(dE_mat)}}()
-    used = Set(node.indices)
-    for idx in used
-        fill!(node.weight.gradient[:, idx], 0)
+    grad = node.weight.gradient
+    indices = node.indices
+
+    # Только реально использованные индексы!
+    for idx in unique(indices)
+        @views grad[:, idx] .= 0
     end
-    for (i, idx) in enumerate(node.indices)
-        acc[idx] = get!(acc, idx, zeros(eltype(dE_mat), size(dE_mat, 1)))
-        acc[idx] .+= dE_mat[:, i]
-    end
-    for (idx, val) in acc
-        node.weight.gradient[:, idx] .+= val
+
+    # Накопление (можно параллелить если хочется)
+    for (col_idx, word_idx) in enumerate(indices)
+        @views grad[:, word_idx] .+= dE_mat[:, col_idx]
     end
 end
 
@@ -616,6 +616,5 @@ function zero_grad!(root::GraphNode)
         end
     end
 end
-
 
 end  # module
