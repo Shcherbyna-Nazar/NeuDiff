@@ -12,7 +12,7 @@ end
 # Zero gradients for all variables in the graph
 function zero_grad!(root::GraphNode)
     for node in topological_sort(root)
-        if node isa Variable
+        if hasproperty(node, :gradient) && node.gradient !== nothing
             fill!(node.gradient, 0)
         end
     end
