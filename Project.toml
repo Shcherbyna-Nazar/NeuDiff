@@ -1,24 +1,32 @@
-name = "MyDiffMLP"
+name = "NeuDiff"
 uuid = "f6602607-f82c-41d6-87eb-03a3e5a9b544"
 authors = ["Nazar Shcherbyna <nazar.force@gmail.com>"]
 version = "0.1.0"
 
 [deps]
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
 FileIO = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
 Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
 IJulia = "7073ff75-c697-5162-941a-fcdaad2a7d2a"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 Languages = "8ef0a80b-9436-5d2c-a485-80b904378c43"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 TextAnalysis = "a2db99b7-8b79-58f8-94bf-bbc811eef33d"
+Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
 [compat]
+BenchmarkTools = "1.6.0"
+FFTW = "1.8.1"
 FileIO = "1.17.0"
 Flux = "0.16.3"
 IJulia = "1.26.0"
 JLD2 = "0.5.12"
 Languages = "0.4.6"
+LinearAlgebra = "1.11.0"
 Random = "1.11.0"
 Statistics = "1.11.1"
 TextAnalysis = "0.8.2"
+Zygote = "0.7.8"
