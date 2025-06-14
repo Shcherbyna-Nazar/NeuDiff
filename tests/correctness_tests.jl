@@ -1,11 +1,12 @@
 using Test
-include("../src/MyAD.jl")
-
-using .MyAD
+push!(LOAD_PATH, "../src")
+using NeuDiff
+using .NeuDiff.MyAD
+using .NeuDiff.MyNN
 using Zygote
 using Flux
-using .MyAD: relu, sigmoid, identity_fn, tanh, flatten_last_two_dims, zero_grad!
 using LinearAlgebra
+using .NeuDiff.MyAD: relu, sigmoid, identity_fn, tanh
 
 @testset "Scalar addition (a + b)" begin
     a_val, b_val = 3.0f0, 2.0f0

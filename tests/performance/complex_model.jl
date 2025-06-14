@@ -1,9 +1,9 @@
-include("../../src/MyAD.jl")
-include("../../src/MyNN.jl")
-using .MyAD, .MyNN
+push!(LOAD_PATH, "../../src")
+using NeuDiff
+using .NeuDiff.MyAD, .NeuDiff.MyNN
+using .NeuDiff.MyAD: relu, identity_fn, flatten_last_two_dims
 using Flux
 using BenchmarkTools
-using .MyNN: relu, identity_fn, flatten_last_two_dims
 
 println("=== Benchmark: Złożony model (Embedding -> Conv1D -> MaxPool1D -> Flatten -> Dense -> Dense) ===")
 

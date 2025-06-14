@@ -1,6 +1,6 @@
-include("../../src/MyAD.jl")
-include("../../src/MyNN.jl")
-using .MyAD, .MyNN
+push!(LOAD_PATH, "../../src")
+using NeuDiff
+using .NeuDiff.MyAD, .NeuDiff.MyNN
 using BenchmarkTools
 using Flux
 

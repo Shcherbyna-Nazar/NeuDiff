@@ -1,6 +1,7 @@
-include("src/MyAD.jl")
-include("src/MyNN.jl")
-using .MyAD, .MyNN
+push!(LOAD_PATH, "src") 
+using NeuDiff
+using .NeuDiff.MyAD
+using .NeuDiff.MyNN
 using JLD2, Printf, Statistics, Random
 using TimerOutputs, LinearAlgebra
 
