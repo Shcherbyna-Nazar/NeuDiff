@@ -3,6 +3,7 @@ using NeuDiff
 using .NeuDiff.MyAD, .NeuDiff.MyNN
 using BenchmarkTools
 using Flux
+using .NeuDiff.MyAD:relu
 
 println("=== Benchmark: Dense Layer (MyNN vs Flux) ===")
 

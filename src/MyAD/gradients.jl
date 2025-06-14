@@ -1,15 +1,22 @@
 using Base.Threads: @threads
 using LinearAlgebra: mul!
+using LoopVectorization
 
-# Backward pass for a list of nodes
-function backward!(nodes::Vector{GraphNode}, seed=1.0)
-    last(nodes).gradient = seed
-    for node in reverse(nodes)
-        backward(node)
+
+# --- Core gradient accumulation helper ---
+@inline function accumulate_grad!(x::GraphNode, dx)
+    g = x.gradient
+    if g === nothing || isempty(g) || size(g) != size(dx)
+        # Only if absolutely necessary: reallocate
+        x.gradient = zeros(eltype(dx), size(dx))
+        g = x.gradient
+    end
+    @inbounds @simd for i in eachindex(g)
+        g[i] += dx[i]
     end
 end
 
-# Zero gradients for all variables in the graph
+# --- Zero out all gradients ---
 function zero_grad!(root::GraphNode)
     for node in topological_sort(root)
         if hasproperty(node, :gradient) && node.gradient !== nothing
@@ -18,43 +25,39 @@ function zero_grad!(root::GraphNode)
     end
 end
 
-# Accumulate gradients for a node
-function accumulate_grad!(x::GraphNode, dx)
-    g = x.gradient
-    if g === nothing || isempty(g)
-        x.gradient = copy(dx)
-    else
-        @inbounds @simd for i in eachindex(g)
-            g[i] += dx[i]
-        end
+# --- Backward pass for a list of nodes ---
+function backward!(nodes::Vector{GraphNode}, seed=1.0)
+    last(nodes).gradient = seed
+    for node in reverse(nodes)
+        backward(node)
     end
 end
 
-# Backward for scalar operators
+# --- Scalar Operators ---
 function backward(node::ScalarOperator)
     f, inputs, out_grad = node.f, node.inputs, node.gradient
-    if f == +
+    if f === +
         a, b = inputs
         accumulate_grad!(a, out_grad)
         if size(b.output) != size(out_grad)
-            grad_b = sum(out_grad, dims=2)
+            grad_b = sum(out_grad, dims=2) 
             accumulate_grad!(b, grad_b)
         else
             accumulate_grad!(b, out_grad)
         end
-    elseif f == *
+    elseif f === *
         a, b = inputs
         accumulate_grad!(a, out_grad .* b.output)
         accumulate_grad!(b, out_grad .* a.output)
-    elseif f == -
+    elseif f === -
         a, b = inputs
         accumulate_grad!(a, out_grad)
         accumulate_grad!(b, -out_grad)
-    elseif f == /
+    elseif f === /
         a, b = inputs
         accumulate_grad!(a, out_grad ./ b.output)
         accumulate_grad!(b, -out_grad .* a.output ./ (b.output .^ 2))
-    elseif f == ^
+    elseif f === ^
         x, y = inputs
         if y isa Constant
             accumulate_grad!(x, out_grad .* y.output .* x.output .^ (y.output .- 1))
@@ -67,30 +70,26 @@ function backward(node::ScalarOperator)
     end
 end
 
-# Backward for matrix multiplication
+# --- Matrix Multiplication ---
 function backward(node::MatMulOperator)
     A, B, out_grad = node.A, node.B, node.gradient
     if A.gradient === nothing || size(A.gradient) != size(A.output)
-        A.gradient = similar(A.output)
-        fill!(A.gradient, 0)
+        A.gradient = zeros(eltype(A.output), size(A.output))
     end
     if B.gradient === nothing || size(B.gradient) != size(B.output)
-        B.gradient = similar(B.output)
-        fill!(B.gradient, 0)
+        B.gradient = zeros(eltype(B.output), size(B.output))
     end
     mul!(A.gradient, out_grad, B.output', 1.0, 1.0)
     mul!(B.gradient, A.output', out_grad, 1.0, 1.0)
 end
 
-# Backward for broadcasted operators (elementwise)
+# --- Broadcasted (elementwise) Operators ---
 function backward(node::BroadcastedOperator)
     f, x, out_grad = node.f, node.input, node.gradient
     δ = x.gradient
     if δ === nothing || size(δ) != size(out_grad)
-        δ = x.gradient = similar(out_grad)
-        fill!(δ, 0)
+        δ = x.gradient = zeros(eltype(out_grad), size(out_grad))
     end
-
     if f === relu
         @inbounds @simd for i in eachindex(δ)
             δ[i] += x.output[i] ≥ 0 ? out_grad[i] : zero(eltype(out_grad))
@@ -114,17 +113,13 @@ function backward(node::BroadcastedOperator)
     end
 end
 
-# No-op for constants and variables
-backward(::Constant) = nothing
-backward(::Variable) = nothing
-
-# Backward for flatten operation
+# --- Flatten operation ---
 function backward(node::FlattenOp)
     grad = reshape(node.gradient, node.orig_shape)
     accumulate_grad!(node.x, grad)
 end
 
-# Backward for 1D convolution
+# --- 1D Convolution ---
 function backward(node::Conv1DOp{T}) where {T}
     δ = node.gradient
     K, C, O = size(node.W.output)
@@ -155,10 +150,13 @@ function backward(node::Conv1DOp{T}) where {T}
     end
 
     # dX_col
-    dX_col = node.dX_col
-    if dX_col === nothing || size(dX_col) != (K*C, L_out*B)
-        dX_col = node.dX_col = similar(node.X_col)
+    if node.dX_col === nothing || size(node.dX_col) != (K*C, L_out*B)
+        node.dX_col = zeros(T, K*C, L_out*B)
+    else
+        fill!(node.dX_col, 0)
     end
+    dX_col = node.dX_col
+
     mul!(dX_col, node.W_mat, dout_mat)
 
     # dx_padded
@@ -188,7 +186,7 @@ function backward(node::Conv1DOp{T}) where {T}
     accumulate_grad!(node.input, dx)
 end
 
-# Backward for max pooling
+# --- MaxPool1D ---
 function backward(node::MaxPool1DOp)
     x, dy, idx = node.x, node.gradient, node.indices
     L_out, C, B = size(dy)
@@ -202,36 +200,36 @@ function backward(node::MaxPool1DOp)
             end
         end
     end
-
     accumulate_grad!(x, dx)
 end
 
-# Backward for permutedims
+# --- Permutedims ---
 function backward(node::PermuteDimsOp)
     rev = invperm(node.dims)
     grad = permutedims(node.gradient, rev)
     accumulate_grad!(node.x, grad)
 end
 
-# Backward for embedding
+# --- Embedding ---
 function backward(node::EmbeddingOp)
     dE = node.gradient
     dE_mat = reshape(dE, size(dE, 1), :)
     grad = node.weight.gradient
     indices = node.indices
 
-    # Zero only used indices
     for idx in unique(indices)
         @views grad[:, idx] .= 0
     end
-
-    # Accumulate gradients
     for (col_idx, word_idx) in enumerate(indices)
         @views grad[:, word_idx] .+= dE_mat[:, col_idx]
     end
 end
 
-# Fallback for unsupported nodes
+# --- No-op for constants and variables ---
+backward(::Constant) = nothing
+backward(::Variable) = nothing
+
+# --- Fallback for unsupported nodes ---
 function backward(node::GraphNode)
     error("No backward method defined for type $(typeof(node))")
 end
