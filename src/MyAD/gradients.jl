@@ -1,11 +1,9 @@
 using Base.Threads: @threads
 using LinearAlgebra: mul!
 
-# --- Core gradient accumulation helper ---
 @inline function accumulate_grad!(x::GraphNode, dx)
     g = x.gradient
     if g === nothing || isempty(g) || size(g) != size(dx)
-        # Only if absolutely necessary: reallocate
         x.gradient = zeros(eltype(dx), size(dx))
         g = x.gradient
     end
