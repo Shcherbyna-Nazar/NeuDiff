@@ -116,13 +116,13 @@ end
 
 # --- 1D Convolution ---
 function backward(node::Conv1DOp{T}) where {T}
-    δ = node.gradient
+    δ = node.gradient                   # (L_out, O, B)
     K, C, O = size(node.W.output)
     _, _, B = size(node.input.output)
     S, P = node.stride, node.padding
     L_out = size(δ, 1)
+    L = size(node.input.output, 1)
 
-    # Activation backward
     if node.activation === relu
         δ = δ .* (node.output .> 0)
     elseif node.activation === sigmoid
@@ -130,35 +130,30 @@ function backward(node::Conv1DOp{T}) where {T}
         δ = δ .* σ .* (1 .- σ)
     end
 
-    # Reshape δ to (O, L_out * B)
     dout_mat = reshape(permutedims(δ, (2, 1, 3)), O, :)
 
-    # Gradient w.r.t. weights
     dW_mat = node.X_col * dout_mat'
-    dW = reshape(dW_mat, K, C, O)[K:-1:1, :, :]
+    dW = reshape(dW_mat, K, C, O)[K:-1:1, :, :]  # flip
     accumulate_grad!(node.W, dW)
 
-    # Bias grad
     if node.b !== nothing
         db = sum(dout_mat, dims=2)
         accumulate_grad!(node.b, reshape(db, size(node.b.output)))
     end
 
-    # dX_col
     if node.dX_col === nothing || size(node.dX_col) != (K*C, L_out*B)
         node.dX_col = zeros(T, K*C, L_out*B)
     else
         fill!(node.dX_col, 0)
     end
     dX_col = node.dX_col
-
     mul!(dX_col, node.W_mat, dout_mat)
 
-    # dx_padded
     dx_pad = node.dx_padded
     x_pad_shape = size(node.x_padded)
     if dx_pad === nothing || size(dx_pad) != x_pad_shape
-        dx_pad = node.dx_padded = zeros(T, x_pad_shape)
+        node.dx_padded = zeros(T, x_pad_shape)
+        dx_pad = node.dx_padded
     else
         fill!(dx_pad, 0)
     end
@@ -172,14 +167,15 @@ function backward(node::Conv1DOp{T}) where {T}
         end
     end
 
-    # Unpad
-    if P > 0
-        dx = @view dx_pad[P+1:P+size(node.input.output, 1)+P, :, :]
+   dx = if P > 0
+        @view dx_pad[P+1:P+L, :, :]
     else
-        dx = dx_pad
+        dx_pad
     end
+
     accumulate_grad!(node.input, dx)
 end
+
 
 # --- MaxPool1D ---
 function backward(node::MaxPool1DOp)

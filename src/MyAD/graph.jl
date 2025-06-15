@@ -120,7 +120,6 @@ function forward(node::Conv1DOp{T}) where {T}
     L_padded = L + 2P
     L_out = (L_padded - K) ÷ S + 1
 
-    # -- Preallocate and reuse all buffers --
     x_padded = node.x_padded
     if x_padded === nothing || size(x_padded) != (L_padded, C, B)
         node.x_padded = zeros(T, L_padded, C, B)
@@ -148,10 +147,11 @@ function forward(node::Conv1DOp{T}) where {T}
     end
 
     if node.W_mat === nothing || size(node.W_mat) != (K*C, O)
-        node.W_mat = reshape(permutedims(W, (1,2,3))[K:-1:1, :, :], K*C, O)  # Flipped kernel, column-major
+        Wf = W[K:-1:1, :, :]
+        node.W_mat = reshape(Wf, K*C, O)
         node.W_mat_T = transpose(node.W_mat)
     else
-        Wf = permutedims(W, (1,2,3))[K:-1:1, :, :]
+        Wf = W[K:-1:1, :, :]
         reshape!(node.W_mat, Wf, K*C, O)
         node.W_mat_T = transpose(node.W_mat)
     end
@@ -159,12 +159,11 @@ function forward(node::Conv1DOp{T}) where {T}
 
     out_mat = node.out_mat
     if out_mat === nothing || size(out_mat) != (O, L_out*B)
-        node.out_mat = zeros(eltype(W_mat_T), O, L_out*B)
+        node.out_mat = zeros(T, O, L_out*B)
         out_mat = node.out_mat
     else
         fill!(out_mat, 0)
     end
-
     mul!(out_mat, W_mat_T, X_col)
 
     if b !== nothing
@@ -172,11 +171,10 @@ function forward(node::Conv1DOp{T}) where {T}
     end
 
     out = reshape(out_mat, O, L_out, B)
-    # Only permute if not already correct layout
-    if !(size(out, 1) == L_out && size(out, 2) == O && size(out, 3) == B)
-        out = permutedims(out, (2, 1, 3))
-    end
+    out = permutedims(out, (2, 1, 3))  
+
     node.output = node.activation === identity_fn ? out : node.activation.(out)
+    return nothing
 end
 
 function forward(node::MaxPool1DOp)
