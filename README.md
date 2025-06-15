@@ -63,7 +63,6 @@ NeuDiff/
 │   └── km3_test.jl
 ├── .gitignore
 ├── Manifest.toml
-├── MLP_TFIDF_myAD_myNN.jl      # (example training script)
 ├── Project.toml
 └── README.md
 ```
