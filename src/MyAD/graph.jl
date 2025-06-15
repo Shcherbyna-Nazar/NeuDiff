@@ -1,7 +1,8 @@
 using Base.Threads: @threads
 using LinearAlgebra: mul!
 
-# === Topological Sort Utilities ===
+
+# ---- Topological Sort ----
 
 """
     visit_children(node, visited, order)
@@ -25,9 +26,7 @@ end
 
 function visit_children(node::Conv1DOp, visited::Set{GraphNode}, order::Vector{GraphNode})
     visit(node.W, visited, order)
-    if node.b !== nothing
-        visit(node.b, visited, order)
-    end
+    node.b !== nothing && visit(node.b, visited, order)
     visit(node.input, visited, order)
 end
 
@@ -51,7 +50,7 @@ function visit_children(::GraphNode, ::Set{GraphNode}, ::Vector{GraphNode})
     # fallback: no children
 end
 
-function visit(node::GraphNode, visited::Set{GraphNode}, order::Vector{GraphNode})
+function visit(node::GraphNode, visited::Set, order::Vector)
     if node ∉ visited
         push!(visited, node)
         visit_children(node, visited, order)
@@ -59,11 +58,6 @@ function visit(node::GraphNode, visited::Set{GraphNode}, order::Vector{GraphNode
     end
 end
 
-"""
-    topological_sort(root)
-
-Returns a topologically sorted vector of nodes starting from `root`.
-"""
 function topological_sort(root::GraphNode)
     visited = Set{GraphNode}()
     order = Vector{GraphNode}()
@@ -71,13 +65,7 @@ function topological_sort(root::GraphNode)
     return order
 end
 
-# === Forward Pass ===
-
-"""
-    forward!(nodes)
-
-Runs the forward pass for a vector of nodes.
-"""
+# ---- Forward Pass ----
 function forward!(nodes::Vector{GraphNode})
     for node in nodes
         forward(node)
@@ -85,17 +73,18 @@ function forward!(nodes::Vector{GraphNode})
 end
 
 function forward(node::ScalarOperator)
-    inputs = map(n -> n.output, node.inputs)
-    if node.output === nothing || size(node.output) != size(inputs[1])
-        node.output = similar(inputs[1])
+    in1, in2 = node.inputs[1].output, node.inputs[2].output
+    if node.output === nothing || size(node.output) != size(in1)
+        node.output = similar(in1)
     end
-    broadcast!(node.f, node.output, inputs[1], inputs[2])
+    @inbounds broadcast!(node.f, node.output, in1, in2)
 end
 
 function forward(node::MatMulOperator)
     A, B = node.A.output, node.B.output
-    if node.output === nothing || size(node.output) != (size(A,1), size(B,2))
-        node.output = similar(A, size(A,1), size(B,2))
+    szA, szB = size(A,1), size(B,2)
+    if node.output === nothing || size(node.output) != (szA, szB)
+        node.output = zeros(eltype(A), szA, szB) 
     end
     mul!(node.output, A, B)
 end
@@ -105,48 +94,48 @@ function forward(node::BroadcastedOperator)
     if node.output === nothing || size(node.output) != size(x)
         node.output = similar(x)
     end
-    broadcast!(node.f, node.output, x)
+    @inbounds broadcast!(node.f, node.output, x)
 end
 
 forward(::Constant) = nothing
 forward(::Variable) = nothing
 
 function forward(node::FlattenOp)
-    node.orig_shape = size(node.x.output)
-    flat_rows = prod(node.orig_shape[1:end-1])
-    flat_cols = node.orig_shape[end]
+    orig_shape = size(node.x.output)
+    flat_rows = prod(orig_shape[1:end-1])
+    flat_cols = orig_shape[end]
     if node.output === nothing || size(node.output) != (flat_rows, flat_cols)
         node.output = reshape(node.x.output, flat_rows, flat_cols)
     else
         reshape!(node.output, node.x.output, flat_rows, flat_cols)
     end
+    node.orig_shape = orig_shape
 end
 
 function forward(node::Conv1DOp{T}) where {T}
-    x = node.input.output
-    W = node.W.output
-    b = node.b === nothing ? nothing : node.b.output
-
+    x, W, b = node.input.output, node.W.output, node.b === nothing ? nothing : node.b.output
     K, C, O = size(W)
     L, _, B = size(x)
     P, S = node.padding, node.stride
     L_padded = L + 2P
     L_out = (L_padded - K) ÷ S + 1
 
-    # Allocate or reuse padded input
-    if node.x_padded === nothing || size(node.x_padded) != (L_padded, C, B)
-        node.x_padded = zeros(T, L_padded, C, B)
-    else
-        fill!(node.x_padded, 0)
-    end
-    @views node.x_padded[P+1:P+L, :, :] .= x
     x_padded = node.x_padded
-
-    # im2col transform
-    if node.X_col === nothing || size(node.X_col) != (K * C, L_out * B)
-        node.X_col = zeros(T, K * C, L_out * B)
+    if x_padded === nothing || size(x_padded) != (L_padded, C, B)
+        node.x_padded = zeros(T, L_padded, C, B)
+        x_padded = node.x_padded
+    else
+        fill!(x_padded, 0)
     end
+    @views x_padded[P+1:P+L, :, :] .= x
+
     X_col = node.X_col
+    if X_col === nothing || size(X_col) != (K*C, L_out*B)
+        node.X_col = zeros(T, K*C, L_out*B)
+        X_col = node.X_col
+    else
+        fill!(X_col, 0)
+    end
 
     col = 1
     @inbounds for b in 1:B
@@ -157,34 +146,35 @@ function forward(node::Conv1DOp{T}) where {T}
         end
     end
 
-    # Flip and reshape kernel
-    W_flipped = @view W[K:-1:1, :, :]
     if node.W_mat === nothing || size(node.W_mat) != (K*C, O)
-        node.W_mat = reshape(copy(W_flipped), K*C, O)
+        Wf = W[K:-1:1, :, :]
+        node.W_mat = reshape(Wf, K*C, O)
         node.W_mat_T = transpose(node.W_mat)
     else
-        reshape!(node.W_mat, copy(W_flipped), K*C, O)
+        Wf = W[K:-1:1, :, :]
+        reshape!(node.W_mat, Wf, K*C, O)
         node.W_mat_T = transpose(node.W_mat)
     end
     W_mat_T = node.W_mat_T
 
-    # Matrix multiplication
-    if node.out_mat === nothing || size(node.out_mat) != (O, L_out * B)
-        node.out_mat = similar(W_mat_T, O, L_out * B)
-    end
     out_mat = node.out_mat
-
+    if out_mat === nothing || size(out_mat) != (O, L_out*B)
+        node.out_mat = zeros(T, O, L_out*B)
+        out_mat = node.out_mat
+    else
+        fill!(out_mat, 0)
+    end
     mul!(out_mat, W_mat_T, X_col)
 
-    # Bias addition
     if b !== nothing
         @inbounds @views out_mat .+= reshape(b, O, 1)
     end
 
-    # Reshape and activate
     out = reshape(out_mat, O, L_out, B)
-    out = permutedims(out, (2, 1, 3))
+    out = permutedims(out, (2, 1, 3))  
+
     node.output = node.activation === identity_fn ? out : node.activation.(out)
+    return nothing
 end
 
 function forward(node::MaxPool1DOp)
@@ -193,13 +183,21 @@ function forward(node::MaxPool1DOp)
     k, s = node.kernel_size, node.stride
     out_len = div(L - k, s) + 1
 
-    node.output = node.output !== nothing && size(node.output) == (out_len, C, B) ? node.output : zeros(eltype(x), out_len, C, B)
-    node.indices = node.indices !== nothing && size(node.indices) == (out_len, C, B) ? node.indices : zeros(Int, out_len, C, B)
+    if node.output === nothing || size(node.output) != (out_len, C, B)
+        node.output = zeros(eltype(x), out_len, C, B)
+    else
+        fill!(node.output, 0)
+    end
+    if node.indices === nothing || size(node.indices) != (out_len, C, B)
+        node.indices = zeros(Int, out_len, C, B)
+    else
+        fill!(node.indices, 0)
+    end
     out, idx = node.output, node.indices
 
     @threads for b in 1:B
         for c in 1:C
-            for i in 0:out_len-1
+            @inbounds for i in 0:out_len-1
                 r = i*s+1:i*s+k
                 win = @view x[r, c, b]
                 max_val, max_idx = findmax(win)
@@ -212,17 +210,15 @@ end
 
 function forward(node::PermuteDimsOp)
     x = node.x.output
-    T = eltype(x)
     out = permutedims(x, node.dims)
-    result = Array{T, 3}(undef, size(out)...)
-    copyto!(result, out)
-    node.output = result
+    if node.output === nothing || size(node.output) != size(out)
+        node.output = similar(out)
+    end
+    copyto!(node.output, out)
 end
 
 function forward(node::EmbeddingOp)
     node.output = reshape(node.weight.output[:, node.indices], node.shape)
 end
 
-function forward(node::GraphNode)
-    error("No forward method defined for type $(typeof(node))")
-end
+forward(node::GraphNode) = error("No forward method for type $(typeof(node))")

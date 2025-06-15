@@ -91,9 +91,6 @@ function train_one_epoch!(model, params, state, X_train, y_train, batch_size, η
     return total_loss / num_batches, total_acc / num_batches
 end
 
-# @benchmark train_one_epoch!(model, params, state, X_train, y_train, batch_size, η)
-
-# === Training loop ===
 for epoch in 1:epochs
     println("=== Epoch $epoch ===")
     total_loss, total_acc, num_batches = 0.0, 0.0, 0

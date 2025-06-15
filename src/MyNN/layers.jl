@@ -23,10 +23,6 @@ struct Dropout{T}
     rate::T
 end
 
-function Dropout(rate::T) where {T}
-    Dropout{T}(rate)
-end
-
 function (d::Dropout)(x::MyAD.GraphNode)
     # Placeholder; implement dropout logic if needed
     x
