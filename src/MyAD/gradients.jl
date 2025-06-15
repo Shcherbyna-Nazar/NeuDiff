@@ -34,29 +34,26 @@ end
 # --- Scalar Operators ---
 function backward(node::ScalarOperator)
     f, inputs, out_grad = node.f, node.inputs, node.gradient
+    a, b = inputs
     if f === +
-        a, b = inputs
         accumulate_grad!(a, out_grad)
         if size(b.output) != size(out_grad)
-            grad_b = sum(out_grad, dims=2) 
+            grad_b = sum(out_grad, dims=2)
             accumulate_grad!(b, grad_b)
         else
             accumulate_grad!(b, out_grad)
         end
     elseif f === *
-        a, b = inputs
         accumulate_grad!(a, out_grad .* b.output)
         accumulate_grad!(b, out_grad .* a.output)
     elseif f === -
-        a, b = inputs
         accumulate_grad!(a, out_grad)
         accumulate_grad!(b, -out_grad)
     elseif f === /
-        a, b = inputs
         accumulate_grad!(a, out_grad ./ b.output)
         accumulate_grad!(b, -out_grad .* a.output ./ (b.output .^ 2))
     elseif f === ^
-        x, y = inputs
+        x, y = a, b
         if y isa Constant
             accumulate_grad!(x, out_grad .* y.output .* x.output .^ (y.output .- 1))
         else
@@ -167,7 +164,7 @@ function backward(node::Conv1DOp{T}) where {T}
     end
 
     col = 1
-    @inbounds @simd for b in 1:B
+    @inbounds for b in 1:B
         for l in 0:L_out-1
             patch = @view dx_pad[l*S+1:l*S+K, :, b]
             @views patch .+= reshape(dX_col[:, col], K, C)

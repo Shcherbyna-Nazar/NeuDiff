@@ -91,59 +91,54 @@ function train_one_epoch!(model, params, state, X_train, y_train, batch_size, η
     return total_loss / num_batches, total_acc / num_batches
 end
 
-using Profile
+# @benchmark train_one_epoch!(model, params, state, X_train, y_train, batch_size, η)
 
-@benchmark train_one_epoch!(model, params, state, X_train, y_train, batch_size, η)
+# === Training loop ===
+for epoch in 1:epochs
+    println("=== Epoch $epoch ===")
+    total_loss, total_acc, num_batches = 0.0, 0.0, 0
+    batches = create_batches(X_train, y_train, batchsize=batch_size)
+    println("  → Training on $(length(batches)) batches of size $batch_size...")
 
+    t = @elapsed begin
+        for (i, (x, y)) in enumerate(batches)
+            out = model(x)
+            graph = topological_sort(out)
+            forward!(graph)
 
+            ŷ = out.output
+            loss = bce(ŷ, y)
+            acc = accuracy(ŷ, y)
 
+            total_loss += loss
+            total_acc += acc
+            num_batches += 1
 
-# # === Training loop ===
-# for epoch in 1:epochs
-#     println("=== Epoch $epoch ===")
-#     total_loss, total_acc, num_batches = 0.0, 0.0, 0
-#     batches = create_batches(X_train, y_train, batchsize=batch_size)
-#     println("  → Training on $(length(batches)) batches of size $batch_size...")
+            zero_gradients!(model)
+            out.gradient = bce_grad(ŷ, y)
+            backward!(graph, out.gradient)
+            update_adam!(state, params, η)
 
-#     t = @elapsed begin
-#         for (i, (x, y)) in enumerate(batches)
-#             out = model(x)
-#             graph = topological_sort(out)
-#             forward!(graph)
+            if i % 100 == 0 || i == length(batches)
+                println(@sprintf("    Batch %d/%d: loss = %.4f, acc = %.4f", i, length(batches), loss, acc))
+            end
+        end
+    end
 
-#             ŷ = out.output
-#             loss = bce(ŷ, y)
-#             acc = accuracy(ŷ, y)
+    train_loss = total_loss / num_batches
+    train_acc = total_acc / num_batches
 
-#             total_loss += loss
-#             total_acc += acc
-#             num_batches += 1
+    # === Evaluation ===
+    println("  → Evaluation on test set...")
+    out_eval = model(X_test)
+    forward!(topological_sort(out_eval))
+    test_pred = out_eval.output
+    test_loss = bce(test_pred, y_test)
+    test_acc = accuracy(test_pred, y_test)
 
-#             zero_gradients!(model)
-#             out.gradient = bce_grad(ŷ, y)
-#             backward!(graph, out.gradient)
-#             update_adam!(state, params, η)
-
-#             if i % 100 == 0 || i == length(batches)
-#                 println(@sprintf("    Batch %d/%d: loss = %.4f, acc = %.4f", i, length(batches), loss, acc))
-#             end
-#         end
-#     end
-
-#     train_loss = total_loss / num_batches
-#     train_acc = total_acc / num_batches
-
-#     # === Evaluation ===
-#     println("  → Evaluation on test set...")
-#     out_eval = model(X_test)
-#     forward!(topological_sort(out_eval))
-#     test_pred = out_eval.output
-#     test_loss = bce(test_pred, y_test)
-#     test_acc = accuracy(test_pred, y_test)
-
-#     println("🟢 Example predictions: ", round.(test_pred[1:10]; digits=3))
-#     println("🎯 Ground truth       : ", y_test[1,1:10])
-#     println(@sprintf("✅ Epoch %d finished in %.2fs", epoch, t))
-#     println(@sprintf("🏋️  Train: loss = %.4f, acc = %.4f", train_loss, train_acc))
-#     println(@sprintf("🧪  Test : loss = %.4f, acc = %.4f\n", test_loss, test_acc))
-# end
+    println("🟢 Example predictions: ", round.(test_pred[1:10]; digits=3))
+    println("🎯 Ground truth       : ", y_test[1,1:10])
+    println(@sprintf("✅ Epoch %d finished in %.2fs", epoch, t))
+    println(@sprintf("🏋️  Train: loss = %.4f, acc = %.4f", train_loss, train_acc))
+    println(@sprintf("🧪  Test : loss = %.4f, acc = %.4f\n", test_loss, test_acc))
+end

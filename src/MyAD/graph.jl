@@ -77,7 +77,7 @@ function forward(node::ScalarOperator)
     if node.output === nothing || size(node.output) != size(in1)
         node.output = similar(in1)
     end
-    broadcast!(node.f, node.output, in1, in2)
+    @inbounds broadcast!(node.f, node.output, in1, in2)
 end
 
 function forward(node::MatMulOperator)
@@ -94,7 +94,7 @@ function forward(node::BroadcastedOperator)
     if node.output === nothing || size(node.output) != size(x)
         node.output = similar(x)
     end
-    broadcast!(node.f, node.output, x)
+    @inbounds broadcast!(node.f, node.output, x)
 end
 
 forward(::Constant) = nothing
@@ -120,23 +120,24 @@ function forward(node::Conv1DOp{T}) where {T}
     L_padded = L + 2P
     L_out = (L_padded - K) ÷ S + 1
 
-    # Pad input (reuse if possible)
-    if node.x_padded === nothing || size(node.x_padded) != (L_padded, C, B)
-        node.x_padded = zeros(T, L_padded, C, B)
-    else
-        fill!(node.x_padded, 0)
-    end
-    @views node.x_padded[P+1:P+L, :, :] .= x
+    # -- Preallocate and reuse all buffers --
     x_padded = node.x_padded
-
-    # im2col (columns)
-    if node.X_col === nothing || size(node.X_col) != (K*C, L_out*B)
-        node.X_col = zeros(T, K*C, L_out*B)   # Only if shape changed
+    if x_padded === nothing || size(x_padded) != (L_padded, C, B)
+        node.x_padded = zeros(T, L_padded, C, B)
+        x_padded = node.x_padded
     else
-        fill!(node.X_col, 0)                  # Just zero out
+        fill!(x_padded, 0)
     end
+    @views x_padded[P+1:P+L, :, :] .= x
 
     X_col = node.X_col
+    if X_col === nothing || size(X_col) != (K*C, L_out*B)
+        node.X_col = zeros(T, K*C, L_out*B)
+        X_col = node.X_col
+    else
+        fill!(X_col, 0)
+    end
+
     col = 1
     @inbounds for b in 1:B
         for l in 0:L_out-1
@@ -146,21 +147,24 @@ function forward(node::Conv1DOp{T}) where {T}
         end
     end
 
-    # Flip and reshape kernel
-    W_flipped = @view W[K:-1:1, :, :]
     if node.W_mat === nothing || size(node.W_mat) != (K*C, O)
-        node.W_mat = reshape(copy(W_flipped), K*C, O)
+        node.W_mat = reshape(permutedims(W, (1,2,3))[K:-1:1, :, :], K*C, O)  # Flipped kernel, column-major
         node.W_mat_T = transpose(node.W_mat)
     else
-        reshape!(node.W_mat, copy(W_flipped), K*C, O)
+        Wf = permutedims(W, (1,2,3))[K:-1:1, :, :]
+        reshape!(node.W_mat, Wf, K*C, O)
         node.W_mat_T = transpose(node.W_mat)
     end
     W_mat_T = node.W_mat_T
 
-    if node.out_mat === nothing || size(node.out_mat) != (O, L_out*B)
-        node.out_mat = zeros(eltype(W_mat_T), O, L_out*B)
-    end
     out_mat = node.out_mat
+    if out_mat === nothing || size(out_mat) != (O, L_out*B)
+        node.out_mat = zeros(eltype(W_mat_T), O, L_out*B)
+        out_mat = node.out_mat
+    else
+        fill!(out_mat, 0)
+    end
+
     mul!(out_mat, W_mat_T, X_col)
 
     if b !== nothing
@@ -168,7 +172,10 @@ function forward(node::Conv1DOp{T}) where {T}
     end
 
     out = reshape(out_mat, O, L_out, B)
-    out = permutedims(out, (2, 1, 3))
+    # Only permute if not already correct layout
+    if !(size(out, 1) == L_out && size(out, 2) == O && size(out, 3) == B)
+        out = permutedims(out, (2, 1, 3))
+    end
     node.output = node.activation === identity_fn ? out : node.activation.(out)
 end
 
@@ -192,7 +199,7 @@ function forward(node::MaxPool1DOp)
 
     @threads for b in 1:B
         for c in 1:C
-            for i in 0:out_len-1
+            @inbounds for i in 0:out_len-1
                 r = i*s+1:i*s+k
                 win = @view x[r, c, b]
                 max_val, max_idx = findmax(win)

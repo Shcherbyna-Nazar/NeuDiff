@@ -5,7 +5,6 @@ abstract type GraphNode end
 mutable struct Constant{T} <: GraphNode
     output::T
 end
-Constant(x::T) where {T} = Constant{T}(x)
 
 # === Variables (with gradient) ===
 mutable struct Variable{T, N} <: GraphNode
