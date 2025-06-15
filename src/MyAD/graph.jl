@@ -1,6 +1,5 @@
 using Base.Threads: @threads
 using LinearAlgebra: mul!
-using LoopVectorization
 
 
 # ---- Topological Sort ----

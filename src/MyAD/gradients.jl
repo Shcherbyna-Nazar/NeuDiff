@@ -1,7 +1,5 @@
 using Base.Threads: @threads
 using LinearAlgebra: mul!
-using LoopVectorization
-
 
 # --- Core gradient accumulation helper ---
 @inline function accumulate_grad!(x::GraphNode, dx)
